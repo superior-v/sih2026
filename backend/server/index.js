@@ -30,6 +30,8 @@ import { ImageAnnotatorClient } from "@google-cloud/vision";
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import jwt from 'jsonwebtoken';
 import bcryptjs from 'bcryptjs';
+import { evaluateCompliance, rulesConfig } from "./complianceEngine.js";
+import PDFDocument from 'pdfkit';
 
 const bcrypt = bcryptjs;
 
@@ -413,21 +415,72 @@ async function lookupBarcodeInfo(barcode) {
   }
 }
 
-/* ===== 5) LM field parser ===== */
+/* ===== 5) Legal Metrology Field Parser & Validator ===== */
 function parseFields(fullText) {
   const raw = (fullText || "").replace(/\r\n/g, "\n");
   const text = raw.replace(/[ \t]+/g, " ");
   const upper = text.toUpperCase();
 
-  // MRP (e.g. M.R.P. ₹ : 299.00, MRP: 299, RS. 299)
+  // MRP & Tax Disclaimer (e.g. M.R.P. ₹ : 299.00 (Incl. of all taxes), MRP: 299)
   const mMrp =
     upper.match(/(?:MRP|M\.R\.P\.?|MAX(?:IMUM)?\s*RETAIL\s*PRICE|PRICE|RS\.?|INR|₹)\s*[:\.\-]?\s*([₹RRs\.]?\s?\d{1,5}(?:[ ,]?\d{3})*(?:\.\d{1,2})?)/i) ||
     upper.match(/([₹]\s?\d{1,5}(?:\.\d{1,2})?)/);
+  const hasTaxDisclaimer = /(?:INCL(?:USIVE)?\.?\s*(?:OF)?\s*ALL\s*TAXES|INCL\.?\s*OF\s*ALL\s*TAXES)/i.test(upper);
+  const mrpVal = mMrp ? parseFloat(mMrp[1].replace(/[^0-9.]/g, "")) : null;
+  const isMrpCompliant = Boolean(mMrp && mrpVal && mrpVal > 0 && hasTaxDisclaimer);
 
   // Net Quantity / Net Content (e.g. Net Content (When Packed) : 100 ml, 100ml, 500 g)
   const mNet =
-    upper.match(/(?:NET\s*(?:CONTENT|QUANTITY|QTY|WT|WEIGHT|VOL|VOLUME)|NET)\s*(?:\([^\)]*\))?\s*[:\.\-]?\s*(\d+(?:\.\d+)?\s*(?:ML|L|LTR|LITRES?|G|GM|GRAMS?|KG|KGS|TABLETS|CAPSULES|PIECES|PCS|COUNT|N\b))/i) ||
+    upper.match(/(?:NET\s*(?:CONTENT|QUANTITY|QTY|WT|WEIGHT|VOL|VOLUME)|NET)\s*(?:\([^\)]*\))?\s*[:\.\-]?\s*(\d+(?:\.\d+)?\s*(?:ML|L|LTR|LITRES?|G|GM|GRAMS?|KG|KGS|TABLETS|CAPSULES|PIECES|PCS|COUNT|N\b|U\b))/i) ||
     upper.match(/(\d+(?:\.\d+)?\s*(?:ML|LTR|LITRES?|GM|GRAMS?|KG|KGS)\b)/i);
+  
+  let netQtyVal = null;
+  let netQtyUnit = null;
+  let isNetQtyCompliant = false;
+  let netQtyReason = "Net quantity is missing.";
+
+  if (mNet && mNet[1]) {
+    const rawNet = mNet[1].trim();
+    const qtyMatch = rawNet.match(/^(\d+(?:\.\d+)?)\s*([A-Za-z]+)$/);
+    if (qtyMatch) {
+      netQtyVal = parseFloat(qtyMatch[1]);
+      netQtyUnit = qtyMatch[2].toLowerCase();
+      const validSI = ["g", "kg", "ml", "l", "ltr", "m", "cm", "mm", "number", "unit", "piece", "pcs", "n", "u"];
+      if (validSI.includes(netQtyUnit)) {
+        isNetQtyCompliant = true;
+        netQtyReason = "Declared with valid SI unit.";
+      } else {
+        netQtyReason = `Unit '${netQtyUnit}' is not a recognised SI unit under Rule 11/13.`;
+      }
+    }
+  }
+
+  // Unit Sale Price (USP) (e.g. (RS. 2.99/ML), Rs 2.99 / ml)
+  const mUsp =
+    upper.match(/(?:USP|UNIT\s*SALE\s*PRICE|\(RS\.?|\(INR)\s*[:\.\-]?\s*([₹Rs\.]?\s?\d+(?:\.\d+)?\s*\/\s*(?:ML|L|G|GM|KG|PCS|PIECE|UNIT|M|CM))/i);
+  let uspVal = null;
+  let isUspCompliant = false;
+  let uspReason = "USP not detected.";
+
+  if (mUsp && mUsp[1]) {
+    const uspMatch = mUsp[1].match(/(\d+(?:\.\d+)?)/);
+    if (uspMatch) {
+      uspVal = parseFloat(uspMatch[1]);
+      if (mrpVal && netQtyVal && netQtyVal > 0) {
+        const expectedPerUnit = +(mrpVal / netQtyVal).toFixed(2);
+        if (Math.abs(expectedPerUnit - uspVal) <= 0.05 || Math.abs((mrpVal / (netQtyVal / 1000)) - uspVal) <= 0.05) {
+          isUspCompliant = true;
+          uspReason = `USP ₹${uspVal} correctly matches MRP (₹${mrpVal}) / Net Qty.`;
+        } else {
+          isUspCompliant = false;
+          uspReason = `Declared USP (₹${uspVal}) does not match calculated price (₹${expectedPerUnit}).`;
+        }
+      } else {
+        isUspCompliant = true;
+        uspReason = "USP format detected.";
+      }
+    }
+  }
 
   // Batch No (e.g. Batch No. : AD22124, LOT NO 123)
   const mBatch =
@@ -443,34 +496,121 @@ function parseFields(fullText) {
     upper.match(/(?:USE\s*BEFORE|EXPIRY\s*DATE|EXP\.?\s*DATE|BEST\s*BEFORE|EXPIRY|EXP)\s*[:\.\-]?\s*([A-Z0-9\/\.\s-]{3,25})/i) ||
     upper.match(/BEST\s+BEFORE[^A-Z0-9]*([0-9]{1,2}\s*(?:MONTH|MONTHS|YEAR|YEARS)|\d+\s*DAYS)/i);
 
-  // Unit Sale Price (e.g. (RS. 2.99/ML), Rs 2.99 / ml)
-  const mUsp =
-    upper.match(/(?:USP|UNIT\s*SALE\s*PRICE|\(RS\.?|\(INR)\s*[:\.\-]?\s*([₹Rs\.]?\s?\d+(?:\.\d+)?\s*\/\s*(?:ML|L|G|GM|KG|PCS|PIECE|UNIT))/i);
-
   // Country of Origin
   const mOrigin = upper.match(/COUNTRY\s+OF\s+ORIGIN\s*[:\.\-]?\s*([A-Z]+)/i) ||
     (upper.includes("MADE IN INDIA") ? { 1: "INDIA" } : null);
 
-  // Manufacturer (e.g. M.: HIM/COS/16/227, Mfd by XYZ)
+  // Manufacturer / Packer / Importer (Rule 6(1)(a) requires complete name & address with PIN code)
   const mManu = upper.match(/(?:MFD\.?\s*BY|MANUFACTURER|MANUFACTURED\s*BY|MFRD\.?\s*BY|PRODUCED\s*BY|PACKED\s*BY|MARKETED\s*BY|M\.:)\s*[:\.\-]?\s*([A-Z0-9&\-\.,\/ ]{4,})/i);
+  let manuText = mManu?.[1]?.trim() || null;
+  let isManuCompliant = false;
+  let manuReason = "Manufacturer/Packer name & address not detected.";
+
+  if (manuText) {
+    // Check if it's only a license number like HIM/COS/... or M.L. No
+    const isOnlyLicense = /^[A-Z0-9\/-]{5,20}$/i.test(manuText) || /^(HIM|COS|MFG|LIC|ML|FDA|DL)[\/]/i.test(manuText);
+    const hasPostalOrCity = /PIN|PLOT|SECTOR|STREET|ROAD|NAGAR|ROAD|MIDC|ESTATE|DIST|MUMBAI|DELHI|PUNE|BANGALORE|CHENNAI|HYDERABAD|KOLKATA|SOLAN|BADDI|GUJARAT|MAHARASHTRA|HARYANA|\b\d{6}\b/i.test(upper);
+
+    if (isOnlyLicense && !hasPostalOrCity) {
+      isManuCompliant = false;
+      manuReason = "Found manufacturing license number only. Rule 6(1)(a) requires complete postal address of manufacturer with PIN code.";
+    } else if (manuText.length >= 10 || hasPostalOrCity) {
+      isManuCompliant = true;
+      manuReason = "Manufacturer details declared.";
+    } else {
+      isManuCompliant = false;
+      manuReason = "Address appears incomplete (requires city/state & PIN code).";
+    }
+  }
 
   // Consumer care
   const mCare = upper.match(/(?:CONSUMER\s*CARE|CUSTOMER\s*CARE|HELPLINE|TOLL\s*FREE|EMAIL)\s*[:\.\-]?\s*([0-9\-\+\s]{8,}|[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,})/i);
+  const hasCareEmail = /[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}/.test(upper);
+  const hasCarePhone = /(\+91[\-\s]?)?[0]?(91)?[6789]\d{9}|1800[\-\s]?\d{3}[\-\s]?\d{3,4}/.test(upper);
+  const isCareCompliant = hasCareEmail || hasCarePhone;
 
-  // Product Name
-  const mName = upper.match(/([A-Z][A-Z0-9 \-\+]{4,})\s*(?:HONEY|TEA|OIL|RICE|BISCUIT|MILK|JUICE|POWDER|CREAM|LOTION|SHAMPOO|GEL|SERUM|WASH|SOAP)?/);
+  // Product Name / Generic Name
+  // Filter out barcode/scanner instruction text like "SCAN WITH THE TRANSPARENCY APP"
+  const mName = upper.match(/([A-Z][A-Z0-9 \-\+]{4,})\s*(?:HONEY|TEA|OIL|RICE|BISCUIT|MILK|JUICE|POWDER|CREAM|LOTION|SHAMPOO|GEL|SERUM|WASH|SOAP|TABLETS|SYRUP)?/);
+  let prodName = mName?.[1]?.trim() || null;
+  if (prodName && /TRANSPARENCY|SCAN\s+WITH|DOWNLOAD\s+APP|BARCODE|QR\s*CODE/i.test(prodName)) {
+    prodName = null;
+  }
+  const isProdNameCompliant = Boolean(prodName && prodName.length >= 3);
 
   return {
-    productName: { text: mName?.[1]?.trim() || null, confidence: mName ? 85 : 0, compliant: !!mName },
-    netQuantity: { text: mNet?.[1]?.trim() || null, confidence: mNet ? 95 : 0, compliant: !!mNet },
-    mrp: { text: mMrp?.[1]?.trim() || null, confidence: mMrp ? 95 : 0, compliant: !!mMrp },
-    unitSalePrice: { text: mUsp?.[1]?.trim() || null, confidence: mUsp ? 90 : 0, compliant: !!mUsp },
-    batchNo: { text: mBatch?.[1]?.trim() || null, confidence: mBatch ? 90 : 0, compliant: !!mBatch },
-    mfgDate: { text: mMfg?.[1]?.trim() || null, confidence: mMfg ? 90 : 0, compliant: !!mMfg },
-    bestBefore: { text: mBest?.[1]?.trim() || null, confidence: mBest ? 90 : 0, compliant: !!mBest },
-    manufacturer: { text: mManu?.[1]?.trim() || null, confidence: mManu ? 85 : 0, compliant: !!mManu },
-    countryOfOrigin: { text: mOrigin?.[1]?.trim() || null, confidence: mOrigin ? 85 : 0, compliant: !!mOrigin },
-    consumerCare: { text: mCare?.[1]?.trim() || null, confidence: mCare ? 85 : 0, compliant: !!mCare },
+    productName: {
+      text: prodName,
+      ruleRef: "Rule 6(1)(b)",
+      confidence: isProdNameCompliant ? 90 : 0,
+      compliant: isProdNameCompliant,
+      notes: isProdNameCompliant ? "Generic/Common name identified." : "Generic name of commodity not found (Rule 6(1)(b)).",
+    },
+    netQuantity: {
+      text: mNet?.[1]?.trim() || null,
+      ruleRef: "Rule 6(1)(c) / Rule 11",
+      confidence: isNetQtyCompliant ? 95 : (mNet ? 50 : 0),
+      compliant: isNetQtyCompliant,
+      notes: netQtyReason,
+    },
+    mrp: {
+      text: mMrp?.[1]?.trim() || null,
+      ruleRef: "Rule 6(1)(e)",
+      confidence: isMrpCompliant ? 98 : (mMrp ? 55 : 0),
+      compliant: isMrpCompliant,
+      notes: isMrpCompliant
+        ? "MRP declared with '(inclusive of all taxes)'"
+        : (mMrp ? "MRP declared but missing mandatory '(inclusive of all taxes)' tax disclaimer (Rule 6(1)(e))." : "MRP is missing."),
+    },
+    unitSalePrice: {
+      text: mUsp?.[1]?.trim() || null,
+      ruleRef: "Rule 6(11)",
+      confidence: isUspCompliant ? 95 : (mUsp ? 50 : 0),
+      compliant: isUspCompliant,
+      notes: uspReason,
+    },
+    batchNo: {
+      text: mBatch?.[1]?.trim() || null,
+      ruleRef: "Rule 6(1)(d)",
+      confidence: mBatch ? 90 : 0,
+      compliant: !!mBatch,
+      notes: mBatch ? "Batch/Lot number identified." : "Batch number missing.",
+    },
+    mfgDate: {
+      text: mMfg?.[1]?.trim() || null,
+      ruleRef: "Rule 6(1)(d)",
+      confidence: mMfg ? 90 : 0,
+      compliant: !!mMfg,
+      notes: mMfg ? "Month & Year of manufacture declared." : "Mfg date missing (Rule 6(1)(d)).",
+    },
+    bestBefore: {
+      text: mBest?.[1]?.trim() || null,
+      ruleRef: "Rule 6(1)(da)",
+      confidence: mBest ? 90 : 0,
+      compliant: !!mBest,
+      notes: mBest ? "Use before / Expiry date declared." : "Expiry / Best Before date not detected.",
+    },
+    manufacturer: {
+      text: manuText,
+      ruleRef: "Rule 6(1)(a)",
+      confidence: isManuCompliant ? 90 : (manuText ? 40 : 0),
+      compliant: isManuCompliant,
+      notes: manuReason,
+    },
+    countryOfOrigin: {
+      text: mOrigin?.[1]?.trim() || null,
+      ruleRef: "Rule 6(10) / Rule 6(1)(aa)",
+      confidence: mOrigin ? 90 : 0,
+      compliant: !!mOrigin,
+      notes: mOrigin ? "Country of origin declared." : "Country of origin declaration not detected.",
+    },
+    consumerCare: {
+      text: mCare?.[1]?.trim() || null,
+      ruleRef: "Rule 6(2)",
+      confidence: isCareCompliant ? 90 : 0,
+      compliant: isCareCompliant,
+      notes: isCareCompliant ? "Grievance redressal contact found." : "Consumer grievance redressal email/helpline missing (Rule 6(2)).",
+    },
   };
 }
 
@@ -813,15 +953,16 @@ async function prepareImageForAI(inputBuffer) {
     .toBuffer();
 }
 
-// Contrast-normalized grayscale image for Tesseract (without destructive thresholding)
+// Contrast-normalized and binarized image for Tesseract
 async function prepareImageForTesseract(inputBuffer, fast = false) {
-  const TARGET_W = fast ? 1600 : 2400;
+  const TARGET_W = fast ? 1600 : 2200;
   return await sharp(inputBuffer)
-    .rotate()
+    .rotate() // auto-orient from EXIF
+    .resize({ width: TARGET_W, withoutEnlargement: true, fit: "inside" })
     .grayscale()
-    .resize({ width: TARGET_W, withoutEnlargement: false, fit: "inside" })
     .normalise()
-    .sharpen(fast ? 0.5 : 0.8)
+    .linear(1.4, -20) // Boost contrast between printed text and packaging background
+    .sharpen({ sigma: 1.2, m1: 1.5, m2: 0.5 })
     .png()
     .toBuffer();
 }
@@ -829,7 +970,8 @@ async function prepareImageForTesseract(inputBuffer, fast = false) {
 async function runTesseract(buf, lang = "eng", fast = false) {
   const tessImg = await prepareImageForTesseract(buf, fast);
   const result = await Tesseract.recognize(tessImg, lang, {
-    tessedit_pageseg_mode: 4, // Assume a single column of text of variable sizes
+    tessedit_pageseg_mode: 6, // Assume a uniform block of text
+    tessedit_char_whitelist: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789.,:;/-()#₹ '\"%+",
     preserve_interword_spaces: "1",
   });
   const text = (result?.data?.text || "").trim();
@@ -1033,6 +1175,278 @@ app.post("/api/ocr", upload.single("image"), async (req, res) => {
   }
 });
 
+/* ===== 12.1) OCR PDF Report Generation ===== */
+app.post("/api/ocr/report", async (req, res) => {
+  try {
+    const {
+      extractedText = [],
+      detectedFields = {},
+      confidence = 0,
+      provider = "unknown",
+      ms = 0,
+      productImageUrl = null,
+      modelUsed = null,
+    } = req.body;
+
+    const now = new Date();
+    const dateStr = now.toLocaleDateString("en-IN", { day: "2-digit", month: "long", year: "numeric" });
+    const timeStr = now.toLocaleTimeString("en-IN", { hour: "2-digit", minute: "2-digit", hour12: true });
+
+    // --- Color palette ---
+    const COLOR_DARK    = "#1a1a2e";
+    const COLOR_ACCENT  = "#3b5bdb";
+    const COLOR_GREEN   = "#2f9e44";
+    const COLOR_RED     = "#e03131";
+    const COLOR_AMBER   = "#e67700";
+    const COLOR_LIGHT   = "#f8f9fa";
+    const COLOR_BORDER  = "#dee2e6";
+    const COLOR_MUTED   = "#6c757d";
+    const COLOR_WHITE   = "#ffffff";
+
+    const doc = new PDFDocument({ margin: 50, size: "A4", bufferPages: true });
+    const chunks = [];
+    doc.on("data", (c) => chunks.push(c));
+
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="LM_Compliance_Report_${now.toISOString().slice(0,10)}.pdf"`
+    );
+    doc.pipe(res);
+
+    const PAGE_W = doc.page.width - 100; // usable width (margins 50 each side)
+    const COL_LEFT = 50;
+
+    // ── Helper Functions ──────────────────────────────────────────────────────
+    function drawRect(x, y, w, h, fillColor, strokeColor = null) {
+      doc.save();
+      doc.rect(x, y, w, h);
+      if (fillColor) doc.fillColor(fillColor).fill();
+      if (strokeColor) {
+        doc.rect(x, y, w, h).strokeColor(strokeColor).stroke();
+      }
+      doc.restore();
+    }
+
+    function sectionHeader(label) {
+      doc.moveDown(0.6);
+      const y = doc.y;
+      drawRect(COL_LEFT, y, PAGE_W, 24, COLOR_ACCENT);
+      doc.fillColor(COLOR_WHITE).font("Helvetica-Bold").fontSize(10)
+        .text(label.toUpperCase(), COL_LEFT + 10, y + 7, { width: PAGE_W - 20 });
+      doc.y = y + 30;
+      doc.fillColor(COLOR_DARK);
+    }
+
+    function kv(label, value, y) {
+      doc.font("Helvetica-Bold").fontSize(9).fillColor(COLOR_MUTED)
+        .text(label, COL_LEFT, y, { width: 160, continued: false });
+      doc.font("Helvetica").fontSize(9).fillColor(COLOR_DARK)
+        .text(String(value || "—"), COL_LEFT + 165, y, { width: PAGE_W - 165 });
+    }
+
+    // ── HEADER BANNER ─────────────────────────────────────────────────────────
+    drawRect(0, 0, doc.page.width, 110, COLOR_DARK);
+    doc.fillColor(COLOR_WHITE).font("Helvetica-Bold").fontSize(20)
+      .text("Legal Metrology Compliance Report", 50, 22, { align: "left" });
+    doc.font("Helvetica").fontSize(9).fillColor("#adb5bd")
+      .text("Packaged Commodities Rules, 2011 (Amended up to 24.12.2024)", 50, 50);
+    doc.font("Helvetica").fontSize(9).fillColor("#adb5bd")
+      .text(`Generated: ${dateStr}  •  ${timeStr}`, 50, 65);
+
+    // Compliance badge (overall)
+    const totalFields = Object.keys(detectedFields).length || 1;
+    const compliantCount = Object.values(detectedFields).filter(f => f.compliant).length;
+    const overallScore = Math.round((compliantCount / totalFields) * 100);
+    const badgeColor = overallScore >= 85 ? COLOR_GREEN : overallScore >= 60 ? COLOR_AMBER : COLOR_RED;
+    const badgeLabel = overallScore >= 85 ? "COMPLIANT" : overallScore >= 60 ? "PARTIAL" : "NON-COMPLIANT";
+
+    drawRect(doc.page.width - 160, 18, 110, 74, "transparent");
+    doc.roundedRect(doc.page.width - 158, 20, 108, 70, 6).fillColor(badgeColor).fill();
+    doc.fillColor(COLOR_WHITE).font("Helvetica-Bold").fontSize(22)
+      .text(`${overallScore}%`, doc.page.width - 158, 28, { width: 108, align: "center" });
+    doc.font("Helvetica-Bold").fontSize(9)
+      .text(badgeLabel, doc.page.width - 158, 56, { width: 108, align: "center" });
+
+    doc.y = 125;
+
+    // ── SCAN METADATA ─────────────────────────────────────────────────────────
+    sectionHeader("Scan Metadata");
+    const meta = [
+      ["OCR Engine", provider],
+      ["Model / Provider Used", modelUsed || provider],
+      ["Overall Confidence", `${Math.round(confidence)}%`],
+      ["Server Processing Time", `${ms} ms`],
+      ["Scan Date & Time", `${dateStr} at ${timeStr}`],
+      ["Total Fields Evaluated", totalFields],
+      ["Compliant Fields", compliantCount],
+      ["Non-Compliant Fields", totalFields - compliantCount],
+      ["Compliance Score", `${overallScore}%  —  ${badgeLabel}`],
+    ];
+    meta.forEach(([k, v]) => {
+      kv(k, v, doc.y);
+      doc.y += 16;
+    });
+
+    // ── EXTRACTED TEXT ────────────────────────────────────────────────────────
+    sectionHeader("Raw Extracted Text (OCR Output)");
+    const rawLines = Array.isArray(extractedText) ? extractedText : [];
+    if (rawLines.length === 0) {
+      doc.font("Helvetica-Oblique").fontSize(9).fillColor(COLOR_MUTED)
+        .text("No text was extracted from the image.", COL_LEFT, doc.y);
+      doc.y += 16;
+    } else {
+      drawRect(COL_LEFT, doc.y, PAGE_W, rawLines.length * 14 + 16, COLOR_LIGHT, COLOR_BORDER);
+      let ty = doc.y + 8;
+      rawLines.forEach((line) => {
+        doc.font("Courier").fontSize(8).fillColor(COLOR_DARK)
+          .text(line, COL_LEFT + 8, ty, { width: PAGE_W - 16 });
+        ty += 14;
+      });
+      doc.y = ty + 8;
+    }
+
+    // ── FIELD VALIDATION RESULTS ──────────────────────────────────────────────
+    sectionHeader("Field Validation Results — Legal Metrology Rules Check");
+
+    const fieldOrder = [
+      "productName", "manufacturer", "netQuantity", "mrp", "unitSalePrice",
+      "batchNo", "mfgDate", "bestBefore", "countryOfOrigin", "consumerCare"
+    ];
+    const fieldDisplayNames = {
+      productName:    "Generic / Common Name of Commodity",
+      manufacturer:   "Manufacturer / Packer / Importer Details",
+      netQuantity:    "Net Quantity",
+      mrp:            "Maximum Retail Price (MRP)",
+      unitSalePrice:  "Unit Sale Price (USP)",
+      batchNo:        "Batch / Lot Number",
+      mfgDate:        "Month & Year of Manufacture",
+      bestBefore:     "Best Before / Use By Date",
+      countryOfOrigin:"Country of Origin",
+      consumerCare:   "Consumer Care / Grievance Details",
+    };
+
+    const orderedFields = [
+      ...fieldOrder.filter(k => detectedFields[k]),
+      ...Object.keys(detectedFields).filter(k => !fieldOrder.includes(k))
+    ];
+
+    orderedFields.forEach((fieldKey) => {
+      const field = detectedFields[fieldKey];
+      if (!field) return;
+
+      // Check for page overflow
+      if (doc.y > doc.page.height - 140) doc.addPage();
+
+      const rowY = doc.y;
+      const rowH = 66;
+      const statusColor = field.compliant ? COLOR_GREEN : COLOR_RED;
+      const rowBg = field.compliant ? "#f4fdf6" : "#fff4f4";
+
+      // Row background
+      drawRect(COL_LEFT, rowY, PAGE_W, rowH, rowBg, COLOR_BORDER);
+
+      // Left accent strip
+      drawRect(COL_LEFT, rowY, 4, rowH, statusColor);
+
+      // Status badge
+      const badgeW = 80;
+      drawRect(COL_LEFT + PAGE_W - badgeW - 6, rowY + 6, badgeW, 18, statusColor);
+      doc.fillColor(COLOR_WHITE).font("Helvetica-Bold").fontSize(8)
+        .text(field.compliant ? "✓  COMPLIANT" : "✗  VIOLATION", COL_LEFT + PAGE_W - badgeW - 6, rowY + 10, { width: badgeW, align: "center" });
+
+      // Field name
+      const displayName = fieldDisplayNames[fieldKey] || fieldKey.replace(/([A-Z])/g, " $1").trim();
+      doc.fillColor(COLOR_DARK).font("Helvetica-Bold").fontSize(10)
+        .text(displayName, COL_LEFT + 12, rowY + 8, { width: PAGE_W - badgeW - 30 });
+
+      // Rule reference
+      if (field.ruleRef) {
+        doc.fillColor(COLOR_ACCENT).font("Helvetica").fontSize(8)
+          .text(`[${field.ruleRef}]`, COL_LEFT + 12, rowY + 22, { width: PAGE_W - badgeW - 30 });
+      }
+
+      // Extracted value
+      const valueText = field.text ? `Detected: ${field.text}` : "Not detected on label";
+      doc.fillColor(field.text ? COLOR_DARK : COLOR_MUTED)
+        .font(field.text ? "Courier" : "Helvetica-Oblique").fontSize(8.5)
+        .text(valueText, COL_LEFT + 12, rowY + 36, { width: PAGE_W - badgeW - 30 });
+
+      // Notes / reason
+      if (field.notes) {
+        doc.fillColor(field.compliant ? COLOR_GREEN : COLOR_AMBER)
+          .font("Helvetica-Oblique").fontSize(8)
+          .text(`→ ${field.notes}`, COL_LEFT + 12, rowY + 50, { width: PAGE_W - badgeW - 30 });
+      }
+
+      doc.y = rowY + rowH + 6;
+    });
+
+    // ── SUMMARY TABLE ─────────────────────────────────────────────────────────
+    if (doc.y > doc.page.height - 200) doc.addPage();
+    sectionHeader("Compliance Summary");
+
+    const violations = orderedFields
+      .filter(k => detectedFields[k] && !detectedFields[k].compliant)
+      .map(k => ({
+        field: fieldDisplayNames[k] || k,
+        ruleRef: detectedFields[k].ruleRef || "—",
+        reason: detectedFields[k].notes || "Non-compliant",
+      }));
+
+    if (violations.length === 0) {
+      doc.fillColor(COLOR_GREEN).font("Helvetica-Bold").fontSize(10)
+        .text("✓  All detected fields comply with Legal Metrology (Packaged Commodities) Rules, 2011.", COL_LEFT, doc.y);
+      doc.y += 16;
+    } else {
+      doc.fillColor(COLOR_DARK).font("Helvetica-Bold").fontSize(9)
+        .text(`${violations.length} violation(s) found requiring corrective action:`, COL_LEFT, doc.y);
+      doc.y += 14;
+
+      violations.forEach((v, i) => {
+        if (doc.y > doc.page.height - 80) doc.addPage();
+        const vy = doc.y;
+        drawRect(COL_LEFT, vy, PAGE_W, 40, "#fff8f0", "#ffc9a0");
+        drawRect(COL_LEFT, vy, 4, 40, COLOR_AMBER);
+        doc.fillColor(COLOR_DARK).font("Helvetica-Bold").fontSize(9)
+          .text(`${i + 1}. ${v.field}`, COL_LEFT + 12, vy + 6, { width: PAGE_W - 20 });
+        doc.fillColor(COLOR_ACCENT).font("Helvetica").fontSize(8)
+          .text(v.ruleRef, COL_LEFT + 12, vy + 19, { width: 200 });
+        doc.fillColor(COLOR_AMBER).font("Helvetica-Oblique").fontSize(8)
+          .text(v.reason, COL_LEFT + 12, vy + 29, { width: PAGE_W - 24 });
+        doc.y = vy + 46;
+      });
+    }
+
+    // ── LEGAL FOOTER ──────────────────────────────────────────────────────────
+    const footerY = doc.page.height - 55;
+    drawRect(0, footerY, doc.page.width, 55, COLOR_DARK);
+    doc.fillColor("#adb5bd").font("Helvetica").fontSize(7.5)
+      .text(
+        "This report is auto-generated by the Legal Metrology Compliance Checker system. It is an indicative tool and does not substitute official inspection under the Legal Metrology Act, 2009.",
+        50, footerY + 10, { width: doc.page.width - 100, align: "center" }
+      );
+    doc.fillColor("#6c757d").fontSize(7)
+      .text(
+        "Reference: Legal Metrology (Packaged Commodities) Rules, 2011 — Amended up to 24.12.2024  |  Ministry of Consumer Affairs, Food & Public Distribution, Government of India",
+        50, footerY + 28, { width: doc.page.width - 100, align: "center" }
+      );
+    doc.fillColor("#495057").fontSize(7)
+      .text(
+        `Confidential  •  ${dateStr}  •  Page 1 of 1`,
+        50, footerY + 42, { width: doc.page.width - 100, align: "center" }
+      );
+
+    doc.end();
+
+  } catch (e) {
+    console.error("[/api/ocr/report] error:", e);
+    if (!res.headersSent) {
+      res.status(500).json({ error: e instanceof Error ? e.message : String(e) });
+    }
+  }
+});
+
 /* ===== 13) Product info route ===== */
 app.get("/api/product-info", async (req, res) => {
   try {
@@ -1093,6 +1507,26 @@ app.get("/api/product-info", async (req, res) => {
   } catch (e) {
     const msg = e instanceof Error ? e.message : "Something went wrong";
     console.error("[product-info] error:", msg);
+    return res.status(500).json({ error: msg });
+  }
+});
+
+/* ===== 13.1) Legal Metrology Compliance Rule Engine Routes ===== */
+app.get("/api/compliance/rules", (_req, res) => {
+  return res.json(rulesConfig);
+});
+
+app.post("/api/evaluate-compliance", (req, res) => {
+  try {
+    const productData = req.body;
+    if (!productData || typeof productData !== "object") {
+      return res.status(400).json({ error: "Invalid product data payload." });
+    }
+    const evaluation = evaluateCompliance(productData);
+    return res.json(evaluation);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : "Compliance evaluation failed";
+    console.error("[evaluate-compliance] error:", msg);
     return res.status(500).json({ error: msg });
   }
 });

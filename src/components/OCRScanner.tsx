@@ -4,9 +4,11 @@ import {
   ScanLine,
   FileImage,
   Download,
+  FileText,
   Zap,
   CheckCircle,
   AlertTriangle,
+  Loader2,
 } from "lucide-react";
 import LiveScanner from "./LiveScanner";
 import { useAuth } from '../contexts/AuthContext';
@@ -16,6 +18,8 @@ type DetectedField = {
   text: string | null;
   confidence: number;
   compliant: boolean;
+  ruleRef?: string;
+  notes?: string;
 };
 
 type OCRState = {
@@ -249,6 +253,8 @@ const OCRScanner: React.FC = () => {
     }
   }
 
+  const [isPdfLoading, setIsPdfLoading] = useState(false);
+
   function exportResults() {
     if (!ocrResults) return;
     const blob = new Blob([JSON.stringify(ocrResults, null, 2)], {
@@ -260,6 +266,43 @@ const OCRScanner: React.FC = () => {
     a.download = "ocr_results.json";
     a.click();
     URL.revokeObjectURL(url);
+  }
+
+  async function downloadPdfReport() {
+    if (!ocrResults || isPdfLoading) return;
+    setIsPdfLoading(true);
+    try {
+      const resp = await fetch(`${API_BASE}/api/ocr/report`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          extractedText: ocrResults.extractedText,
+          detectedFields: ocrResults.detectedFields,
+          confidence: ocrResults.confidence,
+          provider: ocrResults.provider,
+          ms: ocrResults.ms,
+          modelUsed: ocrResults.modelUsed,
+          productImageUrl: selectedImage || null,
+        }),
+      });
+      if (!resp.ok) {
+        const err = await resp.json().catch(() => ({}));
+        throw new Error(err.error || `Server error ${resp.status}`);
+      }
+      const pdfBlob = await resp.blob();
+      const url = URL.createObjectURL(pdfBlob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `LM_Compliance_Report_${new Date().toISOString().slice(0, 10)}.pdf`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      alert(`PDF generation failed: ${e?.message || "Unknown error"}`);
+    } finally {
+      setIsPdfLoading(false);
+    }
   }
 
   function resetScan() {
@@ -517,35 +560,63 @@ const OCRScanner: React.FC = () => {
             </div>
 
             <div className="mt-6">
-              <h4 className="text-lg font-semibold text-gray-900 mb-4">
-                Field Validation Results
+              <h4 className="text-lg font-semibold text-gray-900 mb-4 flex items-center justify-between">
+                <span>Field Validation Results</span>
+                <span className="text-xs font-normal text-gray-500">
+                  Evaluated against Legal Metrology (Packaged Commodities) Rules, 2011
+                </span>
               </h4>
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                 {Object.entries(ocrResults.detectedFields).map(
                   ([field, data]) => (
-                    <div key={field} className="p-4 bg-gray-50 rounded-lg border">
+                    <div
+                      key={field}
+                      className={`p-4 rounded-lg border transition-all ${
+                        data.compliant
+                          ? "bg-green-50/40 border-green-200"
+                          : data.text
+                          ? "bg-amber-50/40 border-amber-200"
+                          : "bg-red-50/40 border-red-200"
+                      }`}
+                    >
                       <div className="flex items-center justify-between mb-2">
-                        <p className="font-medium text-gray-900 capitalize">
-                          {field.replace(/([A-Z])/g, " $1").trim()}
-                        </p>
+                        <div className="flex items-center space-x-2 flex-wrap">
+                          <p className="font-semibold text-gray-900 capitalize">
+                            {field.replace(/([A-Z])/g, " $1").trim()}
+                          </p>
+                          {data.ruleRef && (
+                            <span className="px-1.5 py-0.5 bg-gray-100 text-gray-700 text-xs rounded font-mono border border-gray-200">
+                              {data.ruleRef}
+                            </span>
+                          )}
+                        </div>
                         <div className="flex items-center space-x-2">
                           {data.compliant ? (
                             <CheckCircle className="h-5 w-5 text-green-500" />
                           ) : (
-                            <AlertTriangle className="h-5 w-5 text-red-500" />
+                            <AlertTriangle className="h-5 w-5 text-amber-500" />
                           )}
-                          <span className="text-sm text-gray-600">
-                            {data.confidence}%
+                          <span
+                            className={`text-xs font-semibold px-2 py-0.5 rounded-full ${
+                              data.compliant
+                                ? "bg-green-100 text-green-800"
+                                : "bg-red-100 text-red-800"
+                            }`}
+                          >
+                            {data.compliant ? "Compliant" : "Non-Compliant"}
                           </span>
                         </div>
                       </div>
-                      <p className="text-sm text-gray-700">
-                        {data.text || "—"}
-                      </p>
-                      {!data.compliant && (
-                        <p className="text-xs text-red-600 mt-1">
-                          Does not meet Legal Metrology requirements (or not
-                          detected).
+                      <div className="p-2 bg-white rounded border border-gray-100 my-1 font-mono text-sm text-gray-800">
+                        {data.text || <span className="text-gray-400 italic">Not detected on package label</span>}
+                      </div>
+                      {data.notes && (
+                        <p
+                          className={`text-xs mt-1.5 font-medium ${
+                            data.compliant ? "text-green-700" : "text-amber-800"
+                          }`}
+                        >
+                          {data.notes}
                         </p>
                       )}
                     </div>
@@ -554,14 +625,33 @@ const OCRScanner: React.FC = () => {
               </div>
             </div>
 
-            <div className="mt-6 flex space-x-4">
+            <div className="mt-6 flex flex-wrap gap-3">
+              {/* PDF Report */}
+              <button
+                className="flex items-center space-x-2 px-6 py-3 bg-gradient-to-r from-indigo-600 to-blue-600 text-white rounded-lg hover:from-indigo-700 hover:to-blue-700 transition-all shadow-md disabled:opacity-60 disabled:cursor-not-allowed"
+                onClick={downloadPdfReport}
+                disabled={isPdfLoading}
+                title="Download structured Legal Metrology compliance PDF report"
+              >
+                {isPdfLoading ? (
+                  <Loader2 className="h-4 w-4 animate-spin" />
+                ) : (
+                  <FileText className="h-4 w-4" />
+                )}
+                <span>{isPdfLoading ? "Generating PDF…" : "Download PDF Report"}</span>
+              </button>
+
+              {/* JSON Export */}
               <button
                 className="flex items-center space-x-2 px-6 py-3 bg-blue-600 text-white rounded-lg hover:bg-blue-700 transition-colors"
                 onClick={exportResults}
+                title="Download raw OCR JSON output"
               >
                 <Download className="h-4 w-4" />
-                <span>Export Results</span>
+                <span>Export JSON</span>
               </button>
+
+              {/* Scan Another */}
               <button
                 className="flex items-center space-x-2 px-6 py-3 bg-white border border-gray-300 rounded-lg hover:bg-gray-50 transition-colors"
                 onClick={resetScan}

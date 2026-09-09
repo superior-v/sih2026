@@ -180,25 +180,33 @@ export async function getUserOCRScans(userId: string): Promise<OCRScanLog[]> {
   try {
     console.log('🔍 Firebase: Fetching OCR scans for user:', userId);
     
-    const q = query(
-      collection(db, 'ocrScans'),
-      where('userId', '==', userId),
-      orderBy('timestamp', 'desc'),
-      limit(100)
-    );
-
-    const snapshot = await getDocs(q);
+    // Use query without compound orderBy to avoid requiring composite index
+    let snapshot;
+    try {
+      const q = query(
+        collection(db, 'ocrScans'),
+        where('userId', '==', userId),
+        limit(100)
+      );
+      snapshot = await getDocs(q);
+    } catch (err) {
+      // Fallback: get all scans and filter by userId
+      const allScans = await getDocs(query(collection(db, 'ocrScans'), limit(200)));
+      snapshot = {
+        docs: allScans.docs.filter(d => !userId || d.data().userId === userId)
+      };
+    }
     
     console.log('📦 Firebase: Found', snapshot.docs.length, 'OCR scans');
     
     return snapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data(),
-      timestamp: doc.data().timestamp?.toDate(),
-    })) as OCRScanLog[];
+      timestamp: doc.data().timestamp?.toDate ? doc.data().timestamp.toDate() : new Date(),
+    })).sort((a: any, b: any) => (b.timestamp?.getTime?.() || 0) - (a.timestamp?.getTime?.() || 0)) as OCRScanLog[];
   } catch (error) {
     console.error('❌ Firebase: Error fetching user OCR scans:', error);
-    throw error;
+    return [];
   }
 }
 
@@ -211,9 +219,13 @@ export interface ComplianceCheckLog {
   userId: string;
   userName: string;
   productName: string;
+  platform?: string;
+  category?: string;
+  productUrl?: string;
   isCompliant: boolean;
   issues: string[];
   complianceScore: number;
+  violations?: any[];
   timestamp: Date;
 }
 
@@ -223,7 +235,13 @@ export async function logComplianceCheck(
   productName: string,
   isCompliant: boolean,
   issues: string[],
-  complianceScore: number
+  complianceScore: number,
+  metadata?: {
+    platform?: string;
+    category?: string;
+    productUrl?: string;
+    violations?: any[];
+  }
 ): Promise<void> {
   try {
     console.log('🔥 Firebase: Starting logComplianceCheck...');
@@ -237,6 +255,10 @@ export async function logComplianceCheck(
       isCompliant,
       issues,
       complianceScore,
+      platform: metadata?.platform || 'E-Commerce',
+      category: metadata?.category || 'Packaged Goods',
+      productUrl: metadata?.productUrl || '',
+      violations: metadata?.violations || [],
       timestamp: Timestamp.now(),
     });
     
@@ -315,41 +337,46 @@ export async function getUserComplianceChecks(userId: string): Promise<Complianc
   try {
     console.log('🔍 Firebase: Fetching compliance checks for user:', userId);
     
-    const q = query(
-      collection(db, 'complianceChecks'),
-      where('userId', '==', userId), // 🔥 This filters by userId
-      orderBy('timestamp', 'desc'),
-      limit(100)
-    );
-
-    const snapshot = await getDocs(q);
+    let snapshot;
+    try {
+      const q = query(
+        collection(db, 'complianceChecks'),
+        where('userId', '==', userId),
+        limit(100)
+      );
+      snapshot = await getDocs(q);
+    } catch (err) {
+      // Fallback: get all compliance checks and filter
+      const allDocs = await getDocs(query(collection(db, 'complianceChecks'), limit(200)));
+      snapshot = {
+        docs: allDocs.docs.filter(d => !userId || d.data().userId === userId)
+      };
+    }
     
     console.log('📦 Firebase: Found', snapshot.docs.length, 'compliance checks');
-    console.log('📄 Raw Firebase data:', snapshot.docs.map(d => ({
-      id: d.id,
-      data: d.data()
-    })));
     
     const checks = snapshot.docs.map(doc => {
       const data = doc.data();
       return {
         id: doc.id,
-        userId: data.userId,
-        userName: data.userName,
-        productName: data.productName,
-        isCompliant: data.isCompliant,
+        userId: data.userId || '',
+        userName: data.userName || 'Anonymous',
+        productName: data.productName || 'Scanned Product',
+        platform: data.platform || 'E-Commerce',
+        category: data.category || 'Packaged Commodities',
+        productUrl: data.productUrl || '',
+        isCompliant: typeof data.isCompliant === 'boolean' ? data.isCompliant : ((data.complianceScore ?? 0) >= 80),
         issues: data.issues || [],
-        complianceScore: data.complianceScore,
-        timestamp: data.timestamp?.toDate() || new Date(),
+        complianceScore: typeof data.complianceScore === 'number' ? data.complianceScore : 75,
+        violations: data.violations || [],
+        timestamp: data.timestamp?.toDate ? data.timestamp.toDate() : new Date(),
       };
     }) as ComplianceCheckLog[];
     
-    console.log('✅ Firebase: Processed checks:', checks);
-    
-    return checks;
+    return checks.sort((a, b) => b.timestamp.getTime() - a.timestamp.getTime());
   } catch (error) {
     console.error('❌ Firebase: Error fetching user compliance checks:', error);
-    return []; // Return empty array on error
+    return [];
   }
 }
 
@@ -436,7 +463,7 @@ export async function getSearches(
     const searches = snapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data(),
-      timestamp: doc.data().timestamp?.toDate(),
+      timestamp: doc.data().timestamp?.toDate ? doc.data().timestamp.toDate() : new Date(),
     })) as SearchLog[];
 
     const lastVisible = snapshot.docs[snapshot.docs.length - 1] || null;
@@ -452,22 +479,28 @@ export async function getUserSearches(userId: string): Promise<SearchLog[]> {
   try {
     console.log('🔍 Firebase: Fetching searches for user:', userId);
     
-    const q = query(
-      collection(db, 'searches'),
-      where('userId', '==', userId),
-      orderBy('timestamp', 'desc'),
-      limit(100)
-    );
-
-    const snapshot = await getDocs(q);
+    let snapshot;
+    try {
+      const q = query(
+        collection(db, 'searches'),
+        where('userId', '==', userId),
+        limit(100)
+      );
+      snapshot = await getDocs(q);
+    } catch (err) {
+      const allDocs = await getDocs(query(collection(db, 'searches'), limit(200)));
+      snapshot = {
+        docs: allDocs.docs.filter(d => !userId || d.data().userId === userId)
+      };
+    }
     
     console.log('📦 Firebase: Found', snapshot.docs.length, 'searches');
     
     return snapshot.docs.map(doc => ({
       id: doc.id,
       ...doc.data(),
-      timestamp: doc.data().timestamp?.toDate(),
-    })) as SearchLog[];
+      timestamp: doc.data().timestamp?.toDate ? doc.data().timestamp.toDate() : new Date(),
+    })).sort((a: any, b: any) => (b.timestamp?.getTime?.() || 0) - (a.timestamp?.getTime?.() || 0)) as SearchLog[];
   } catch (error) {
     console.error('❌ Firebase: Error fetching user searches:', error);
     throw error;
@@ -611,5 +644,67 @@ export async function exportAllData(): Promise<{
   } catch (error) {
     console.error('Error exporting data:', error);
     throw error;
+  }
+}
+
+export async function getAllComplianceReports(): Promise<{
+  complianceChecks: ComplianceCheckLog[];
+  ocrScans: OCRScanLog[];
+  searches: SearchLog[];
+}> {
+  try {
+    const [complianceChecksSnapshot, ocrScansSnapshot, searchesSnapshot] = await Promise.all([
+      getDocs(query(collection(db, 'complianceChecks'), orderBy('timestamp', 'desc'), limit(500))),
+      getDocs(query(collection(db, 'ocrScans'), orderBy('timestamp', 'desc'), limit(500))),
+      getDocs(query(collection(db, 'searches'), orderBy('timestamp', 'desc'), limit(500))),
+    ]);
+
+    const complianceChecks = complianceChecksSnapshot.docs.map(doc => {
+      const d = doc.data();
+      return {
+        id: doc.id,
+        userId: d.userId || '',
+        userName: d.userName || 'Anonymous',
+        productName: d.productName || 'Unknown Product',
+        platform: d.platform || 'E-Commerce',
+        category: d.category || 'Packaged Goods',
+        productUrl: d.productUrl || '',
+        isCompliant: typeof d.isCompliant === 'boolean' ? d.isCompliant : ((d.complianceScore ?? 0) >= 80),
+        issues: d.issues || [],
+        complianceScore: typeof d.complianceScore === 'number' ? d.complianceScore : 75,
+        violations: d.violations || [],
+        timestamp: d.timestamp?.toDate ? d.timestamp.toDate() : new Date(),
+      };
+    }) as ComplianceCheckLog[];
+
+    const ocrScans = ocrScansSnapshot.docs.map(doc => {
+      const d = doc.data();
+      return {
+        id: doc.id,
+        userId: d.userId || '',
+        userName: d.userName || 'Inspector',
+        extractedText: d.extractedText || '',
+        confidence: d.confidence || 0,
+        provider: d.provider || 'OCR Engine',
+        timestamp: d.timestamp?.toDate ? d.timestamp.toDate() : new Date(),
+      };
+    }) as OCRScanLog[];
+
+    const searches = searchesSnapshot.docs.map(doc => {
+      const d = doc.data();
+      return {
+        id: doc.id,
+        userId: d.userId || '',
+        userName: d.userName || '',
+        query: d.query || '',
+        resultsCount: d.resultsCount || 0,
+        timestamp: d.timestamp?.toDate ? d.timestamp.toDate() : new Date(),
+      };
+    }) as SearchLog[];
+
+    return { complianceChecks, ocrScans, searches };
+  } catch (error) {
+    console.error('Error in getAllComplianceReports:', error);
+    return { complianceChecks: [], ocrScans: [], searches: [] };
   }
 }

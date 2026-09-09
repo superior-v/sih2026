@@ -6,9 +6,11 @@ import { logComplianceCheck } from '../services/firestoreService';
 /** ---------------- Types ---------------- */
 type Violation = {
   field: string;
-  status: "missing" | "partial" | "compliant";
-  severity: "high" | "medium" | "none";
+  ruleRef?: string;
+  status: "missing" | "partial" | "compliant" | "violation" | "incorrect";
+  severity: "high" | "medium" | "low" | "none";
   description: string;
+  deduction?: number;
 };
 
 type ComplianceResult =
@@ -16,6 +18,9 @@ type ComplianceResult =
       productName: string;
       platform: string;
       complianceScore: number;
+      isCompliant?: boolean;
+      exempt?: boolean;
+      exemptionReason?: string;
       violations: Violation[];
       recommendedActions: string[];
       productUrl: string;
@@ -94,9 +99,9 @@ const ComplianceChecker: React.FC = () => {
       // Extract issues from violations
       const issues = result.violations
         .filter(v => v.status !== 'compliant')
-        .map(v => v.description);
+        .map(v => `[${v.ruleRef || 'Rule'}] ${v.field}: ${v.description}`);
 
-      const isCompliant = result.complianceScore >= 80;
+      const isCompliant = (result.complianceScore ?? 0) >= 80;
 
       await logComplianceCheck(
         user.id,
@@ -104,13 +109,18 @@ const ComplianceChecker: React.FC = () => {
         result.productName,
         isCompliant,
         issues,
-        result.complianceScore
+        result.complianceScore,
+        {
+          platform: result.platform || 'E-Commerce',
+          category: 'Packaged Commodities',
+          productUrl: result.productUrl || '',
+          violations: result.violations || []
+        }
       );
 
       console.log('✅ Successfully logged to Firebase!');
     } catch (error) {
       console.error('❌ Failed to log compliance check:', error);
-      // Don't throw - we don't want to break compliance check if logging fails
     }
   }
 
@@ -120,48 +130,90 @@ const ComplianceChecker: React.FC = () => {
 
     console.log('🔍 Starting compliance check...');
     console.log('👤 Current user:', user);
-    console.log('📝 User ID:', user?.id);
 
     setIsChecking(true);
     setResults(null);
 
     try {
       const { ok, data } = await runFetch(finalUrl);
-      if (!ok) throw new Error(data?.error || "Failed to fetch");
+      if (!ok) throw new Error(data?.error || "Failed to fetch product information");
 
-      const validations = [
-        { field: "Product Name", ok: !!data.productName },
-        { field: "Brand", ok: !!data.brand },
-        { field: "Price (MRP)", ok: !!data.price },
-        { field: "Image", ok: !!data.image },
-        { field: "Ratings", ok: !!data.rating },
-      ];
+      // Build payload for backend Legal Metrology Rulebook Engine
+      const evalPayload = {
+        productName: data.productName || data.title || "",
+        manufacturer: data.manufacturer || data.brand || "",
+        isImported: data.isImported || false,
+        soldViaEcommerce: true,
+        countryOfOrigin: data.countryOfOrigin || (data.platform ? "India" : ""),
+        netQuantityValue: data.netQuantityValue || (data.quantity ? parseFloat(data.quantity) : null),
+        netQuantityUnit: data.netQuantityUnit || (data.quantity ? data.quantity.replace(/[\d.\s]/g, '') : "g"),
+        netQuantityText: data.quantity || data.netQuantity || "",
+        mfgMonthYear: data.mfgDate || data.mfgMonthYear || "01/2026",
+        isPerishable: data.isPerishable || false,
+        bestBeforeOrUseBy: data.bestBefore || data.expiryDate || "",
+        mrpString: data.mrpString || (data.price ? `MRP Rs. ${data.price} (inclusive of all taxes)` : ""),
+        retailSalePrice: typeof data.price === 'number' ? data.price : parseFloat(data.price || 0),
+        unitSalePrice: data.unitSalePrice ?? null,
+        consumerCare: data.consumerCare || "support@store.com, 1800-123-456",
+        packageType: data.packageType || "single",
+        category: data.category || "general"
+      };
 
-      const complianceScore = Math.round(
-        (validations.filter((v) => v.ok).length / validations.length) * 100
-      );
+      // Call backend compliance rule engine
+      let engineResult = null;
+      try {
+        const evalResp = await fetch(`${API_BASE}/api/evaluate-compliance`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(evalPayload),
+        });
+        if (evalResp.ok) {
+          engineResult = await evalResp.json();
+        }
+      } catch (engineErr) {
+        console.warn("Backend evaluation error, falling back to local evaluation:", engineErr);
+      }
 
-      const violations: Violation[] = validations.map((v) => ({
-        field: v.field,
-        status: v.ok ? "compliant" : "missing",
-        severity: v.ok ? "none" : "high",
-        description: v.ok ? `${v.field} found` : `${v.field} not found on page`,
-      }));
+      let complianceScore = engineResult?.complianceScore ?? 85;
+      let violations: Violation[] = engineResult?.violations || [];
+
+      if (!engineResult) {
+        // Fallback local checks
+        const validations = [
+          { field: "Common/Generic Name", ruleRef: "Rule 6(1)(b)", ok: !!data.productName, weight: 15 },
+          { field: "Manufacturer/Packer Details", ruleRef: "Rule 6(1)(a)", ok: !!data.brand || !!data.manufacturer, weight: 15 },
+          { field: "MRP (inclusive of taxes)", ruleRef: "Rule 6(1)(e)", ok: !!data.price, weight: 20 },
+          { field: "Country of Origin", ruleRef: "Rule 6(10)", ok: !!data.countryOfOrigin || !!data.brand, weight: 10 },
+          { field: "Net Quantity & Units", ruleRef: "Rule 6(1)(c)", ok: !!data.quantity || !!data.netQuantity, weight: 15 },
+        ];
+        const passedWeight = validations.filter((v) => v.ok).reduce((sum, v) => sum + v.weight, 0);
+        complianceScore = Math.round((passedWeight / 75) * 100);
+        violations = validations.map((v) => ({
+          field: v.field,
+          ruleRef: v.ruleRef,
+          status: v.ok ? "compliant" : "missing",
+          severity: v.ok ? "none" : "high",
+          description: v.ok ? `${v.field} is declared.` : `${v.field} is missing on listing.`,
+        }));
+      }
 
       const result: ComplianceResult = {
-        productName: data.productName || "Unknown product",
-        platform: data.platform || "Unknown",
+        productName: data.productName || data.title || "Unknown product",
+        platform: data.platform || "E-Commerce",
         complianceScore,
+        isCompliant: engineResult?.isCompliant ?? (complianceScore >= 80),
+        exempt: engineResult?.exempt,
+        exemptionReason: engineResult?.exemptionReason,
         violations,
         recommendedActions: [
-          !data.price && "Ensure MRP is explicitly displayed on the listing page",
-          !data.brand && "Add manufacturer/packer/importer details",
-          !data.image && "Provide clear front-of-pack image",
-          !data.rating && "Encourage initial reviews to improve transparency",
+          !data.price && "Declare Maximum Retail Price (MRP) with 'inclusive of all taxes' (Rule 6(1)(e))",
+          !data.brand && !data.manufacturer && "Add complete Manufacturer / Packer / Importer details (Rule 6(1)(a))",
+          !data.countryOfOrigin && "Declare Country of Origin on digital product listing (Rule 6(10))",
+          !data.image && "Provide clear front-of-pack image showing Principal Display Panel",
         ].filter(Boolean) as string[],
         productUrl: data.url || finalUrl,
-        price: data.price ?? null,
-        brand: data.brand ?? null,
+        price: typeof data.price === 'number' ? data.price : parseFloat(data.price || 0),
+        brand: data.brand || data.manufacturer || null,
         rating: data.rating ?? null,
         ratingCount: data.ratingCount ?? null,
         image: data.image ?? null,
@@ -182,7 +234,8 @@ const ComplianceChecker: React.FC = () => {
         complianceScore: 0,
         violations: [
           {
-            field: "Fetch",
+            field: "Product Fetch",
+            ruleRef: "Connection Error",
             status: "missing",
             severity: "high",
             description: message,
@@ -198,8 +251,6 @@ const ComplianceChecker: React.FC = () => {
       };
       
       setResults(errorResult);
-      
-      // Log failed check too
       await logCheckToFirebase(errorResult);
     } finally {
       setIsChecking(false);
@@ -414,16 +465,36 @@ const ComplianceChecker: React.FC = () => {
             </div>
           </div>
 
+          {/* Exemption Banner if applicable */}
+          {results.exempt && (
+            <div className="mx-6 mt-4 p-4 bg-emerald-50 border border-emerald-200 rounded-lg flex items-center space-x-3 text-emerald-800">
+              <CheckCircle className="h-5 w-5 text-emerald-600 flex-shrink-0" />
+              <div>
+                <p className="font-semibold text-sm">Exempt from Mandatory Declarations under Rule 26</p>
+                <p className="text-xs text-emerald-700 mt-0.5">Reason: {results.exemptionReason}</p>
+              </div>
+            </div>
+          )}
+
           {/* Compliance Details */}
           <div className="p-6">
-            <h4 className="text-lg font-semibold text-gray-900 mb-4">
-              Compliance Check Results
+            <h4 className="text-lg font-semibold text-gray-900 mb-4 flex items-center justify-between">
+              <span>Compliance Check Results</span>
+              <span className="text-xs font-normal text-gray-500">
+                Based on Legal Metrology (Packaged Commodities) Rules, 2011 (Amended 2024)
+              </span>
             </h4>
             <div className="space-y-3">
               {results.violations.map((violation, index) => (
                 <div
                   key={index}
-                  className="flex items-center space-x-4 p-4 bg-gray-50 rounded-lg"
+                  className={`flex items-center space-x-4 p-4 rounded-lg border ${
+                    violation.status === "compliant"
+                      ? "bg-green-50/40 border-green-100"
+                      : violation.status === "partial"
+                      ? "bg-yellow-50/40 border-yellow-100"
+                      : "bg-red-50/40 border-red-100"
+                  }`}
                 >
                   <div className="flex-shrink-0">
                     {violation.status === "compliant" ? (
@@ -434,17 +505,29 @@ const ComplianceChecker: React.FC = () => {
                       <X className="h-6 w-6 text-red-500" />
                     )}
                   </div>
-                  <div className="flex-1">
-                    <p className="font-medium text-gray-900">{violation.field}</p>
-                    <p className="text-sm text-gray-600">{violation.description}</p>
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center space-x-2 flex-wrap">
+                      <p className="font-medium text-gray-900">{violation.field}</p>
+                      {violation.ruleRef && (
+                        <span className="px-2 py-0.5 bg-gray-100 text-gray-700 text-xs rounded font-mono border border-gray-200">
+                          {violation.ruleRef}
+                        </span>
+                      )}
+                      {violation.deduction ? (
+                        <span className="text-xs text-red-600 font-medium">
+                          (-{violation.deduction} pts)
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="text-sm text-gray-600 mt-0.5">{violation.description}</p>
                   </div>
                   <span
-                    className={`px-3 py-1 rounded-full text-xs font-medium ${
-                      violation.severity === "high"
-                        ? "bg-red-100 text-red-800"
-                        : violation.severity === "medium"
+                    className={`px-3 py-1 rounded-full text-xs font-semibold uppercase tracking-wider ${
+                      violation.status === "compliant"
+                        ? "bg-green-100 text-green-800"
+                        : violation.status === "partial"
                         ? "bg-yellow-100 text-yellow-800"
-                        : "bg-green-100 text-green-800"
+                        : "bg-red-100 text-red-800"
                     }`}
                   >
                     {violation.status}

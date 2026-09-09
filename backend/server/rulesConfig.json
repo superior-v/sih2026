@@ -1,0 +1,147 @@
+{
+  "meta": {
+    "source": "Legal Metrology (Packaged Commodities) Rules, 2011 (as amended up to 24.12.2024)",
+    "lastVerified": "2024-12-24"
+  },
+  "mandatoryFields": [
+    {
+      "id": "manufacturer_packer_importer",
+      "name": "Name & complete address of Manufacturer/Packer/Importer",
+      "ruleRef": "Rule 6(1)(a) / Rule 10",
+      "severity": "high",
+      "weight": 15,
+      "notes": "For imported goods packed in India, packer/importer's Indian address is also mandatory on PDP. Electronic products may use QR code for address."
+    },
+    {
+      "id": "country_of_origin",
+      "name": "Country of Origin/Manufacture/Assembly",
+      "ruleRef": "Rule 6(1)(aa) [imported]; Rule 6(10) [e-commerce]",
+      "severity": "high",
+      "weight": 10
+    },
+    {
+      "id": "generic_name",
+      "name": "Common or generic name of commodity",
+      "ruleRef": "Rule 6(1)(b)",
+      "severity": "high",
+      "weight": 15
+    },
+    {
+      "id": "net_quantity",
+      "name": "Net Quantity",
+      "ruleRef": "Rule 6(1)(c) / Rule 11 / Rule 13",
+      "severity": "high",
+      "weight": 15,
+      "validUnits": ["g", "kg", "ml", "l", "L", "m", "cm", "mm", "cm2", "m2", "number", "unit", "piece", "pair", "set"],
+      "notes": "Must use SI units only. 'N or U' symbol requirement was removed by 2022 amendment; instead a plain word (number/unit/piece/pair/set) is required. Words like 'minimum', 'about', 'approximately' are prohibited."
+    },
+    {
+      "id": "mfg_date",
+      "name": "Month & Year of Manufacture",
+      "ruleRef": "Rule 6(1)(d)",
+      "severity": "medium",
+      "weight": 5,
+      "exemptions": ["bidi", "incense sticks", "14.2kg or 5kg PSU-marketed LPG cylinder", "warrantied spare parts/accessories not sold to end customer"]
+    },
+    {
+      "id": "best_before_use_by",
+      "name": "Best Before / Use By Date",
+      "ruleRef": "Rule 6(1)(da)",
+      "severity": "high",
+      "weight": 10,
+      "condition": "Only required if commodity may become unfit for human consumption over time.",
+      "exemptions": ["governed by another specific law (e.g. FSSAI)"]
+    },
+    {
+      "id": "mrp",
+      "name": "Maximum Retail Price (MRP)",
+      "ruleRef": "Rule 6(1)(e)",
+      "severity": "high",
+      "weight": 20,
+      "mustIncludeTaxDisclaimer": true,
+      "acceptedFormats": [
+        "Maximum or Max. retail price Rs./₹ xx.xx (inclusive of all taxes)",
+        "MRP Rs./₹ xx.xx incl. of all taxes"
+      ],
+      "notes": "Must be in Indian currency. Rounding-off provisos were later omitted (now no mandatory rounding rule)."
+    },
+    {
+      "id": "consumer_care",
+      "name": "Consumer Care / Grievance Details",
+      "ruleRef": "Rule 6(2)",
+      "severity": "medium",
+      "weight": 10,
+      "requires": ["name or office", "address", "telephone number", "email address"]
+    },
+    {
+      "id": "unit_sale_price",
+      "name": "Unit Sale Price (USP)",
+      "ruleRef": "Rule 6(11)",
+      "severity": "medium",
+      "weight": 10,
+      "notRequiredIf": [
+        "retail sale price equals unit sale price",
+        "combination package",
+        "group package",
+        "multi-piece package"
+      ],
+      "formula": {
+        "byWeight": "per gram if net qty < 1kg, else per kg",
+        "byLength": "per cm if net length < 1m, else per metre",
+        "byVolume": "per ml if net volume < 1L, else per litre",
+        "byNumber": "per number or unit"
+      },
+      "roundedTo": 2
+    },
+    {
+      "id": "dimensions",
+      "name": "Dimensions (where size is relevant)",
+      "ruleRef": "Rule 6(1)(f) / Rule 14 / Rule 17",
+      "severity": "low",
+      "weight": 5,
+      "condition": "Applies to bed-sheets, towels, sarees, bags/boxes/containers, etc."
+    }
+  ],
+  "ecommerce": {
+    "ruleRef": "Rule 6(10)",
+    "requirement": "All mandatory declarations except month/year of manufacture must be shown on the digital listing.",
+    "marketplaceSafeHarbor": "Marketplace e-commerce entities are not liable for declaration accuracy if acting as a pure intermediary under IT Act due-diligence conditions."
+  },
+  "exemptions_full_rule26": [
+    {"id": "small_pack", "condition": "net weight/measure <= 10g or 10ml", "exceptFor": ["tobacco and tobacco products"]},
+    {"id": "fast_food", "condition": "packed by restaurant/hotel for immediate sale"},
+    {"id": "scheduled_drugs", "condition": "covered under Drugs (Price Control) Order, 2013", "exceptFor": ["medical devices declared as drugs"]},
+    {"id": "handloom_thread", "condition": "thread sold in coil to handloom weavers"},
+    {"id": "loose_garment_hosiery", "condition": "sold loose/open for pre-purchase inspection", "requiresDisclosure": ["manufacturer/marketer/brand owner/importer name+address+country of origin", "consumer care email/phone", "size in metric or S/M/L notation", "MRP inclusive of taxes"]},
+    {"id": "loose_ecommerce", "condition": "loose commodities ordered via e-commerce where buyer knows type/quantity", "requiresDisclosure": ["manufacturer/marketer/brand/importer/seller name+address+origin", "consumer care email/phone", "MRP inclusive of taxes", "net quantity"]}
+  ],
+  "chapterII_inapplicable_to": [
+    "packages > 25kg or 25 litre (excl. cement/fertiliser bags up to 50kg)",
+    "cement, fertilizer, agricultural produce sold in bags above 50kg",
+    "commodities meant for industrial or institutional consumers"
+  ],
+  "pdpFontSizeTable": {
+    "ruleRef": "Rule 7, Table-I",
+    "byArea_cm2": [
+      {"max": 50, "minHeightMm": 1.0, "minHeightMmBlown": 2.0},
+      {"min": 50, "max": 100, "minHeightMm": 1.5, "minHeightMmBlown": 3.0},
+      {"min": 100, "max": 500, "minHeightMm": 2.5, "minHeightMmBlown": 4.0},
+      {"min": 500, "max": 2500, "minHeightMm": 4.0, "minHeightMmBlown": 6.0},
+      {"min": 2500, "minHeightMm": 6.0, "minHeightMmBlown": 6.0}
+    ]
+  },
+  "maxPermissibleError_byWeightVolume": {
+    "ruleRef": "First Schedule, Table I",
+    "bands": [
+      {"maxG": 50, "errorPct": 9},
+      {"minG": 50, "maxG": 100, "errorG": 4.5},
+      {"minG": 100, "maxG": 200, "errorPct": 4.5},
+      {"minG": 200, "maxG": 300, "errorG": 9},
+      {"minG": 300, "maxG": 500, "errorPct": 3},
+      {"minG": 500, "maxG": 1000, "errorG": 15},
+      {"minG": 1000, "maxG": 10000, "errorPct": 1.5},
+      {"minG": 10000, "maxG": 15000, "errorG": 150},
+      {"minG": 15000, "errorPct": 1.0}
+    ]
+  }
+}

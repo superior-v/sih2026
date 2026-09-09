@@ -29,10 +29,20 @@ import Chatbot from './components/chatbot/Chatbot';
 function UserApp() {
   const [activeView, setActiveView] = React.useState('dashboard');
 
+  React.useEffect(() => {
+    const handleNavigate = (e: any) => {
+      if (e.detail && typeof e.detail === 'string') {
+        setActiveView(e.detail);
+      }
+    };
+    window.addEventListener('navigate-view', handleNavigate);
+    return () => window.removeEventListener('navigate-view', handleNavigate);
+  }, []);
+
   const renderActiveView = () => {
     switch (activeView) {
       case 'dashboard':
-        return <Dashboard />;
+        return <Dashboard onNavigate={setActiveView} />;
       
       case 'live-dashboard':
         return <EnhancedDashboard />;
@@ -59,7 +69,7 @@ function UserApp() {
         return <Reports />;
       
       default:
-        return <Dashboard />;
+        return <Dashboard onNavigate={setActiveView} />;
     }
   };
 
