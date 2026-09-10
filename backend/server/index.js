@@ -235,6 +235,7 @@ const ESP32_ENDPOINTS = {
 
 // Barcode API Configuration
 const BARCODE_API_BASE = "https://api.upcitemdb.com/prod/trial/lookup";
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY || "";
 
 // Safe/optional Vision client init (won't crash if missing)
 let visionClient = null;
@@ -262,6 +263,9 @@ const ALLOW_RE = [
   /(\.|^)grofers\.com$/i,
   /(\.|^)1mg\.com$/i,
   /(\.|^)nykaa\.com$/i,
+  /(\.|^)swiggy\.com$/i,
+  /(\.|^)blinkit\.com$/i,
+  /(\.|^)zeptonow\.com$/i,
   // Add more as needed
 ];
 const isAllowedHost = (host) => ALLOW_RE.some((re) => re.test(host));
@@ -307,6 +311,12 @@ const platformFromHost = (host) =>
             ? "Nykaa"
             : host.includes("1mg")
               ? "1mg"
+              : host.includes("swiggy")
+                ? "Swiggy Instamart"
+                : host.includes("blinkit")
+                  ? "Blinkit"
+                  : host.includes("zepto")
+                    ? "Zepto"
               : "Unknown";
 
 const minimalOk = (d) => !!(d?.productName || d?.brand || d?.price || d?.image);
@@ -1606,6 +1616,568 @@ app.post("/api/evaluate-compliance", (req, res) => {
 
 /* ===== 14) Live Product Crawling Functions (Added from old index.js) ===== */
 
+const insightIssuePatterns = [
+  { key: "missing-manufacturing-date", label: "Manufacturing date missing or unclear", patterns: [/manufactur(e|ing)|mfg\.?\s*date|date of manufacture/i, /missing|not mentioned|unclear|illegible|can't find|cannot find/i] },
+  { key: "missing-expiry-date", label: "Expiry or best-before date missing or unclear", patterns: [/expir(y|es)|best before|use before/i, /missing|not mentioned|unclear|illegible|can't find|cannot find/i] },
+  { key: "quantity-mismatch", label: "Net quantity appears incorrect or inconsistent", patterns: [/net (quantity|content)|weight|volume|grams?|kilograms?|ml|litres?/i, /less|short|mismatch|incorrect|different|underweight/i] },
+  { key: "mrp-concern", label: "MRP or price information concern", patterns: [/mrp|maximum retail price|price/i, /missing|overcharg|higher|incorrect|different|not printed/i] },
+  { key: "packaging-damage", label: "Packaging or seal damage reported", patterns: [/packag(e|ing)|seal|leak|broken|damaged/i, /damage|broken|leak|open|tamper/i] },
+  { key: "quality-concern", label: "Product quality concern", patterns: [/quality|fake|duplicate|spoilt|spoiled|stale|smell|taste/i, /bad|poor|fake|duplicate|spoilt|spoiled|stale|disappoint/i] },
+];
+
+function cleanInsightText(value = "") {
+  return String(value).replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim();
+}
+
+function parseNewsFeed(xml) {
+  const $ = cheerio.load(xml, { xmlMode: true });
+  return $("item").toArray().map((item) => {
+    const node = $(item);
+    return {
+      title: cleanInsightText(node.find("title").text()),
+      url: node.find("link").text().trim(),
+      snippet: cleanInsightText(node.find("description").text()),
+      publishedAt: node.find("pubDate").text().trim() || null,
+      source: cleanInsightText(node.find("source").text()) || "Google News",
+    };
+  }).filter((item) => item.title && item.url);
+}
+
+async function searchPublicInsights(productName, productUrl) {
+  const queries = [
+    `"${productName}" review complaint`,
+    `"${productName}" customer issue packaging`,
+    `"${productName}" manufacturing date MRP quantity`,
+  ];
+
+  if (TAVILY_API_KEY) {
+    const response = await axios.post("https://api.tavily.com/search", {
+      api_key: TAVILY_API_KEY,
+      query: queries.join(" OR "),
+      search_depth: "basic",
+      topic: "general",
+      max_results: 15,
+      include_answer: false,
+    }, { timeout: 15000 });
+
+    return (response.data?.results || []).map((result) => ({
+      title: cleanInsightText(result.title),
+      url: result.url,
+      snippet: cleanInsightText(result.content),
+      publishedAt: result.published_date || null,
+      source: new URL(result.url).hostname.replace(/^www\./, ""),
+    })).filter((item) => item.title && item.url);
+  }
+
+  const results = [];
+  for (const query of queries) {
+    try {
+      const response = await axios.get("https://news.google.com/rss/search", {
+        params: { q: query, hl: "en-IN", gl: "IN", ceid: "IN:en" },
+        timeout: 12000,
+        headers: { "User-Agent": "LegalMetrologyComplianceChecker/1.0" },
+      });
+      results.push(...parseNewsFeed(response.data));
+    } catch (error) {
+      console.warn(`[product-insights] search failed for ${query}:`, error.message);
+    }
+  }
+
+  const unique = new Map(results.map((item) => [item.url, item]));
+  if (productUrl) {
+    unique.set(productUrl, {
+      title: `${productName} product listing`,
+      url: productUrl,
+      snippet: "Original product listing supplied for context; it is not counted as an independent customer report.",
+      publishedAt: null,
+      source: new URL(productUrl).hostname.replace(/^www\./, ""),
+      contextOnly: true,
+    });
+  }
+  return [...unique.values()].slice(0, 20);
+}
+
+function buildInsightReport(productName, sources) {
+  const evidenceSources = sources.filter((source) => !source.contextOnly);
+  const findings = insightIssuePatterns.map((issue) => {
+    const matches = evidenceSources.filter((source) => {
+      const text = `${source.title} ${source.snippet}`;
+      return issue.patterns.every((pattern) => pattern.test(text));
+    });
+    return {
+      key: issue.key,
+      issue: issue.label,
+      mentions: matches.length,
+      prevalence: evidenceSources.length ? Math.round((matches.length / evidenceSources.length) * 100) : 0,
+      confidence: matches.length >= 3 ? "high" : matches.length >= 2 ? "medium" : "low",
+      sources: matches.slice(0, 5).map(({ title, url, source, publishedAt }) => ({ title, url, source, publishedAt })),
+    };
+  }).filter((finding) => finding.mentions > 0).sort((a, b) => b.mentions - a.mentions);
+
+  return {
+    productName,
+    generatedAt: new Date().toISOString(),
+    sourceMethod: TAVILY_API_KEY ? "Tavily deep India consumer research" : "Google News RSS public search",
+    sourceCount: evidenceSources.length,
+    caveat: "Counts indicate repeated mentions in the retrieved public sources, not verified incidents or a statistically representative survey.",
+    summary: findings.length
+      ? `${findings[0].issue} is the most repeated signal in the retrieved public discussion.`
+      : "No recurring compliance-related signal was detected in the retrieved public sources.",
+    findings,
+    sources,
+  };
+}
+
+const authorityReferencePattern = /consumer protection act|legal metrology|packaging compliance|packaging guideline|food safety inspection|handbook|textbook|food process|food preservation|academic|journal|research paper|government|regulation|standard|sellercentral|seller central|vendor portal/i;
+const consumerDiscussionPattern = /review|complaint|complain|customer|buyer|refund|return|damaged|missing|fake|duplicate|quality|taste|expired|expiry|mrp|price|quantity|packaging|seal/i;
+
+function classifyComplaintSource(url, title, snippet) {
+  const host = new URL(url).hostname.replace(/^www\./, "").toLowerCase();
+  const text = `${title} ${snippet}`;
+  if (/sellercentral|seller\.amazon|vendor|seller-portal/i.test(host)) return "reference";
+  if (authorityReferencePattern.test(text)) return "reference";
+  if (/reddit\.com|mouthshut\.com|consumercomplaints\.in|quora\.com/i.test(host)) return "consumer-discussion";
+  if (/amazon\.|flipkart\./i.test(host)) {
+    if (/\/dp\/|flipkart\.com\/.*\/p\//i.test(url)) return "marketplace-listing";
+    return consumerDiscussionPattern.test(text) ? "marketplace-review" : "other";
+  }
+  if (/youtube\.com|instagram\.com|facebook\.com|x\.com/i.test(host) && consumerDiscussionPattern.test(text)) return "social-discussion";
+  if (consumerDiscussionPattern.test(text) && /news|times|ndtv|hindustan|moneycontrol|livemint/i.test(host)) return "consumer-news";
+  return "other";
+}
+
+function isComplaintEvidence(source) {
+  return ["consumer-discussion", "marketplace-review", "social-discussion", "consumer-news"].includes(source.kind);
+}
+
+async function searchComplaintSources(category) {
+  const categoryQuery = category === "food" ? "packaged food grocery products" : category;
+  const queries = [
+    `India ${categoryQuery} consumer complaints reviews Reddit`,
+    `India ${categoryQuery} buyers reporting missing expiry MRP quantity packaging`,
+    `India ${categoryQuery} bad quality damaged packet refund customer review`,
+    `India ${categoryQuery} consumer forum complaint product name`,
+    `site:amazon.in/dp ${categoryQuery} product complaint review India`,
+    `site:flipkart.com ${categoryQuery} product complaint review India`,
+  ];
+
+  if (TAVILY_API_KEY) {
+    const results = [];
+    for (const query of queries) {
+      const response = await axios.post("https://api.tavily.com/search", {
+        api_key: TAVILY_API_KEY,
+        query,
+        search_depth: "advanced",
+        topic: "general",
+        max_results: 10,
+        include_answer: false,
+      }, { timeout: 20000 });
+      results.push(...(response.data?.results || []).map((result) => ({
+        title: cleanInsightText(result.title),
+        url: result.url,
+        snippet: cleanInsightText(result.content),
+        publishedAt: result.published_date || null,
+        source: new URL(result.url).hostname.replace(/^www\./, ""),
+        kind: classifyComplaintSource(result.url, result.title, result.content),
+      })));
+    }
+    const researchDomains = [
+      ["reddit.com", "India packaged product consumer complaint review Reddit"],
+      ["consumercomplaints.in", "India packaged product complaint MRP expiry quantity"],
+      ["mouthshut.com", "India packaged food grocery product review complaint"],
+      ["indianexpress.com", "India packaged food consumer complaint expiry MRP packaging"],
+      ["timesofindia.indiatimes.com", "India consumer complaint packaged food product expiry MRP"],
+    ];
+    for (const [domain, query] of researchDomains) {
+      try {
+        const response = await axios.post("https://api.tavily.com/search", {
+          api_key: TAVILY_API_KEY,
+          query,
+          search_depth: "advanced",
+          topic: "general",
+          max_results: 6,
+          include_answer: false,
+          include_domains: [domain],
+        }, { timeout: 20000 });
+        results.push(...(response.data?.results || []).map((result) => ({
+          title: cleanInsightText(result.title),
+          url: result.url,
+          snippet: cleanInsightText(result.content),
+          publishedAt: result.published_date || null,
+          source: domain,
+          kind: classifyComplaintSource(result.url, result.title, result.content),
+        })));
+      } catch (error) {
+        console.warn(`[complaint-crawl] India research failed for ${domain}:`, error.message);
+      }
+    }
+    for (const domain of ["amazon.in", "flipkart.com"]) {
+      try {
+        const response = await axios.post("https://api.tavily.com/search", {
+          api_key: TAVILY_API_KEY,
+          query: `${categoryQuery} product customer reviews complaint India`,
+          search_depth: "basic",
+          topic: "general",
+          max_results: 10,
+          include_answer: false,
+          include_domains: [domain],
+        }, { timeout: 20000 });
+        results.push(...(response.data?.results || []).map((result) => ({
+          title: cleanInsightText(result.title),
+          url: result.url,
+          snippet: cleanInsightText(result.content),
+          publishedAt: result.published_date || null,
+          source: domain,
+          kind: "marketplace-listing",
+        })));
+      } catch (error) {
+        console.warn(`[complaint-crawl] marketplace search failed for ${domain}:`, error.message);
+      }
+    }
+    const uniqueResults = [...new Map(results.filter((item) => item.title && item.url).map((item) => [item.url, item])).values()];
+    const marketplaceResults = uniqueResults.filter((item) => /amazon\.[^/]+\/dp\/|flipkart\.com\/.*\/p\//i.test(item.url));
+    const discussionCategoryPattern = {
+      food: /honey|rice|tea|coffee|oil|ghee|biscuit|snack|food|drink|juice|flour|sugar|spice|masala|water|cereal|dal|pulse|salt|chocolate|milk|atta|noodle|sauce|pickle|dry fruit|\d+(?:\.\d+)?\s*(?:g|kg|ml|l|litre|liter)\b/i,
+      cosmetics: /shampoo|conditioner|soap|cream|lotion|serum|face|hair|skin|cosmetic|makeup|toothpaste|deodorant|perfume|\d+(?:\.\d+)?\s*(?:g|kg|ml|l)\b/i,
+      electronics: /phone|mobile|laptop|charger|headphone|earbud|speaker|tablet|camera|keyboard|mouse|television|tv|power bank|watt|gb|inch/i,
+      clothing: /shirt|jeans|dress|shoe|sandal|jacket|kurta|saree|clothing|cotton|size|fashion/i,
+      'home-care': /detergent|cleaner|disinfectant|freshener|broom|mop|dishwash|laundry|handwash|tissue|\d+(?:\.\d+)?\s*(?:g|kg|ml|l)\b/i,
+    }[category];
+    const marketplaceProductsForDiscussion = marketplaceResults
+      .filter((product) => discussionCategoryPattern?.test(product.title))
+      .filter((product) => !/novel|handbook|textbook|instrumentation|kettle|book set|cookbook|delivery bag|insulated bag|fiction|consumer rights|consumer protection|book online|reviews?\s*&\s*ratings|food sciences?|food process|food preservation/i.test(product.title))
+      .slice(0, 6);
+    const productDiscussionResults = [];
+    for (const product of marketplaceProductsForDiscussion) {
+      try {
+        const response = await axios.post("https://api.tavily.com/search", {
+          api_key: TAVILY_API_KEY,
+          query: `"${product.title.replace(/"/g, "").slice(0, 120)}" customer review complaint`,
+          search_depth: "advanced",
+          topic: "general",
+          max_results: 6,
+          include_answer: false,
+        }, { timeout: 20000 });
+        productDiscussionResults.push(...(response.data?.results || []).map((result) => ({
+          title: cleanInsightText(result.title),
+          url: result.url,
+          snippet: cleanInsightText(result.content),
+          publishedAt: result.published_date || null,
+          source: new URL(result.url).hostname.replace(/^www\./, ""),
+          kind: classifyComplaintSource(result.url, result.title, result.content),
+          productName: product.title,
+        })));
+      } catch (error) {
+        console.warn(`[complaint-crawl] product discussion search failed:`, error.message);
+      }
+    }
+    const discussionResults = productDiscussionResults
+      .filter((item) => {
+        const productTokens = item.productName.toLowerCase().replace(/[^a-z0-9 ]/g, " ").split(/\s+/)
+          .filter((token) => token.length >= 4 && !["product", "amazon", "india", "review", "natural", "pure"].includes(token))
+          .slice(0, 4);
+        const resultText = `${item.title} ${item.snippet}`.toLowerCase();
+        return productTokens.length > 0 && productTokens.some((token) => resultText.includes(token));
+      })
+      .filter((item) => isComplaintEvidence(item) && !authorityReferencePattern.test(`${item.title} ${item.snippet}`));
+    const uniqueDiscussion = [...new Map(discussionResults.map((item) => [item.url, item])).values()];
+    const relatedConsumerDiscussion = uniqueResults
+      .filter((item) => isComplaintEvidence(item) && !authorityReferencePattern.test(`${item.title} ${item.snippet}`))
+      .filter((item) => /food|grocery|packaged|honey|rice|tea|oil|ghee|snack|expiry|mrp|quantity|packaging/i.test(`${item.title} ${item.snippet}`))
+      .filter((item) => !/cat food|food service|restaurant|fast food|zomato|swiggy|delivery executive/i.test(`${item.title} ${item.snippet}`));
+    return [...marketplaceResults.slice(0, 10), ...uniqueDiscussion, ...relatedConsumerDiscussion]
+      .filter((item, index, all) => all.findIndex((candidate) => candidate.url === item.url) === index)
+      .slice(0, 30);
+  }
+
+  const results = [];
+  for (const query of queries) {
+    const response = await axios.get("https://news.google.com/rss/search", {
+      params: { q: query, hl: "en-IN", gl: "IN", ceid: "IN:en" },
+      timeout: 12000,
+      headers: { "User-Agent": "LegalMetrologyComplianceChecker/1.0" },
+    });
+    results.push(...parseNewsFeed(response.data).map((item) => ({ ...item, kind: classifyComplaintSource(item.url, item.title, item.snippet) })));
+  }
+  return [...new Map(results.filter(isComplaintEvidence).map((item) => [item.url, item])).values()].slice(0, 30);
+}
+
+function buildComplaintReport(category, sources) {
+  const categoryProductPattern = {
+    food: /honey|rice|tea|coffee|oil|ghee|biscuit|snack|food|drink|juice|flour|sugar|spice|masala|water|cereal|dal|pulse|salt|chocolate|milk|atta|noodle|sauce|pickle|dry fruit|\d+(?:\.\d+)?\s*(?:g|kg|ml|l|litre|liter)\b/i,
+    cosmetics: /shampoo|conditioner|soap|cream|lotion|serum|face|hair|skin|cosmetic|makeup|toothpaste|deodorant|perfume|\d+(?:\.\d+)?\s*(?:g|kg|ml|l)\b/i,
+    electronics: /phone|mobile|laptop|charger|headphone|earbud|speaker|tablet|camera|keyboard|mouse|television|tv|power bank|watt|gb|inch/i,
+    clothing: /shirt|jeans|dress|shoe|sandal|jacket|kurta|saree|clothing|cotton|size|fashion/i,
+    'home-care': /detergent|cleaner|disinfectant|freshener|broom|mop|dishwash|laundry|handwash|tissue|\d+(?:\.\d+)?\s*(?:g|kg|ml|l)\b/i,
+  }[category];
+  const excludedProductTitle = /novel|handbook|textbook|instrumentation|kettle|book set|cookbook|delivery bag|insulated bag|fiction|consumer rights|consumer protection|book online|reviews?\s*&\s*ratings|food sciences?|food process|food preservation/i;
+  const acceptedProductNames = new Set(sources
+    .filter((source) => source.productName && categoryProductPattern?.test(source.productName) && !excludedProductTitle.test(source.productName))
+    .map((source) => source.productName));
+  const classifiedSources = sources.map((source) => {
+    const text = `${source.title} ${source.snippet}`;
+    const issues = insightIssuePatterns
+      .filter((issue) => issue.patterns.some((pattern) => pattern.test(text)))
+      .map((issue) => ({ key: issue.key, issue: issue.label }));
+    return { ...source, issues };
+  }).filter((source) => {
+    const isProductLinked = source.productName && acceptedProductNames.has(source.productName);
+    const isIndiaCategoryResearch = !source.productName && isComplaintEvidence(source);
+    return source.issues.length > 0 && (isProductLinked || isIndiaCategoryResearch);
+  });
+
+  const recurringIssues = insightIssuePatterns.map((issue) => {
+    const matches = classifiedSources.filter((source) => source.issues.some((item) => item.key === issue.key));
+    return {
+      key: issue.key,
+      issue: issue.label,
+      mentions: matches.length,
+      prevalence: sources.length ? Math.round((matches.length / sources.length) * 100) : 0,
+      confidence: matches.length >= 5 ? "high" : matches.length >= 2 ? "medium" : "low",
+      sources: matches.slice(0, 5).map(({ title, url, source, publishedAt }) => ({ title, url, source, publishedAt })),
+    };
+  }).filter((issue) => issue.mentions > 0).sort((a, b) => b.mentions - a.mentions);
+
+  const hotspots = classifiedSources.slice(0, 12).map((source) => ({
+    subject: source.title,
+    source: source.source,
+    url: source.url,
+    publishedAt: source.publishedAt,
+    issues: source.issues.map((issue) => issue.issue),
+    evidence: source.snippet,
+  }));
+
+  const productCandidates = sources
+    .filter((source) => /amazon\.[^/]+\/dp\/|flipkart\.com\/.*\/p\//i.test(source.url))
+    .filter((source) => categoryProductPattern?.test(source.title))
+    .filter((source) => !excludedProductTitle.test(source.title))
+    .map((source) => ({
+      productName: source.title.replace(/\s*[|:-]\s*(Amazon|Flipkart).*$/i, '').trim(),
+      productUrl: source.url,
+      source: source.source,
+      evidence: source.snippet,
+    }))
+    .filter((candidate) => candidate.productName.length > 8)
+    .filter((candidate, index, all) => all.findIndex((item) => item.productUrl === candidate.productUrl) === index)
+    .slice(0, 10);
+
+  const relatedDiscussion = sources
+    .filter((source) => isComplaintEvidence(source) && !source.productName)
+    .slice(0, 8)
+    .map(({ title, url, source, snippet }) => ({ title, url, source, snippet }));
+
+  return {
+    category,
+    generatedAt: new Date().toISOString(),
+    sourceMethod: TAVILY_API_KEY ? "Tavily deep India consumer research" : "Google News RSS public search",
+    sourceCount: sources.length,
+    complaintSourceCount: classifiedSources.length,
+    caveat: "These are public-source complaint signals for triage. They require source review and verification before enforcement action.",
+    executiveSummary: recurringIssues.length
+      ? `The strongest public complaint signal for ${category} is ${recurringIssues[0].issue.toLowerCase()}, appearing in ${recurringIssues[0].mentions} retrieved source${recurringIssues[0].mentions === 1 ? "" : "s"}.`
+      : `No recurring compliance-related complaint signal was detected for ${category} in the retrieved public sources.`,
+    recurringIssues,
+    hotspots,
+    productCandidates,
+    relatedDiscussion,
+  };
+}
+
+async function fetchPublicProductDetails(productUrl) {
+  const parsedUrl = new URL(productUrl);
+  if (!isAllowedHost(parsedUrl.hostname)) throw new Error(`Product domain not allowed: ${parsedUrl.hostname}`);
+
+  const response = await fetchWithTimeout(productUrl, { redirect: "follow", headers: COMMON_HEADERS });
+  if (!response.ok) throw new Error(`Product page returned ${response.status}`);
+  const finalUrl = response.url || productUrl;
+  const html = await response.text();
+  let product = extractFromHtml(html, finalUrl);
+
+  if (!minimalOk(product)) {
+    product = await extractWithBrowser(productUrl);
+  }
+  if (!minimalOk(product)) throw new Error("Could not extract a specific product listing from the source");
+  return product;
+}
+
+app.post("/api/analyze-public-product", async (req, res) => {
+  try {
+    const { productName, productUrl } = req.body || {};
+    if (!productName || !productUrl) return res.status(400).json({ error: "productName and productUrl are required" });
+
+    const product = await fetchPublicProductDetails(productUrl);
+    let ocr = null;
+    if (product.image) {
+      const imageResponse = await fetchWithTimeout(product.image, { redirect: "follow" });
+      if (imageResponse.ok) {
+        const imageBuffer = Buffer.from(await imageResponse.arrayBuffer());
+        const provider = pickProvider("hybrid", OCR_PROVIDERS);
+        try {
+          ocr = provider === "hybrid" ? await runHybrid(imageBuffer) : await runGeminiOCR(imageBuffer);
+        } catch (error) {
+          console.warn(`[analyze-public-product] OCR failed: ${error.message}`);
+          ocr = { text: "", confidence: 0, error: error.message };
+        }
+        if (ocr?.text) ocr.detectedFields = parseFields(ocr.text);
+      }
+    }
+
+    const detectedFields = ocr?.detectedFields || {};
+    const fieldValues = Object.values(detectedFields);
+    const compliantFields = fieldValues.filter((field) => field.compliant).length;
+    const complianceScore = fieldValues.length ? Math.round((compliantFields / fieldValues.length) * 100) : null;
+    return res.json({
+      product: { ...product, discoveredName: productName },
+      analysis: {
+        provider: ocr?.modelUsed ? `Gemini (${ocr.modelUsed})` : ocr ? "Hybrid OCR fallback" : "No product image available",
+        ocrConfidence: ocr?.confidence || 0,
+        extractedText: ocr?.text || "",
+        detectedFields,
+        complianceScore,
+        status: complianceScore == null ? "needs-manual-label-image" : complianceScore >= 80 ? "compliant" : complianceScore >= 60 ? "partial-compliant" : "non-compliant",
+        note: complianceScore == null
+          ? "The product listing was identified, but no usable package image was available for OCR. Upload or inspect a label image before making a compliance determination."
+          : "This is an automated label-image assessment. Verify the physical package and original source before enforcement.",
+      },
+    });
+  } catch (error) {
+    console.error("[analyze-public-product] error:", error.message);
+    return res.status(502).json({ error: "Could not analyse the specific product", details: error.message });
+  }
+});
+
+const complaintLanguagePattern = /complaint|complain|missing|unclear|illegible|damaged|broken|leak|overcharg|fake|duplicate|short|mismatch|incorrect|poor quality|disappoint/i;
+const productSignalPattern = /product|packag|label|mrp|maximum retail price|manufactur|mfg|expiry|best before|quantity|weight|volume|seal|consumer/i;
+
+function isSafePublicUrl(value) {
+  try {
+    const url = new URL(value);
+    return ["http:", "https:"].includes(url.protocol) && !/^(localhost|127\.|0\.0\.0\.0|::1)$/i.test(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+async function crawlComplaintHotspot(hotspot) {
+  if (!isSafePublicUrl(hotspot.url)) return { ...hotspot, retained: false, reason: "Invalid public URL" };
+
+  try {
+    const response = await axios.get(hotspot.url, {
+      timeout: 12000,
+      maxContentLength: 4 * 1024 * 1024,
+      headers: { "User-Agent": "LegalMetrologyComplianceChecker/1.0" },
+      validateStatus: (status) => status >= 200 && status < 400,
+    });
+    const $ = cheerio.load(typeof response.data === "string" ? response.data : "");
+    $("script, style, noscript, nav, footer, header, svg").remove();
+    const pageTitle = cleanInsightText($("title").first().text()) || hotspot.subject;
+    const pageText = cleanInsightText($("article, main, [role='main'], body").first().text()).slice(0, 10000);
+    const evidenceText = `${hotspot.subject} ${hotspot.evidence} ${pageTitle} ${pageText}`;
+    const issueMatches = insightIssuePatterns.filter((issue) => issue.patterns.every((pattern) => pattern.test(evidenceText)));
+    const complaintSignal = complaintLanguagePattern.test(evidenceText);
+    const productSignal = productSignalPattern.test(evidenceText);
+    const relevanceScore = (complaintSignal ? 2 : 0) + (productSignal ? 1 : 0) + issueMatches.length * 2;
+    const retained = pageText.length >= 160 && complaintSignal && productSignal && issueMatches.length > 0 && relevanceScore >= 5;
+
+    return {
+      subject: pageTitle || hotspot.subject,
+      source: hotspot.source,
+      url: hotspot.url,
+      issues: issueMatches.map((issue) => issue.label),
+      evidence: cleanInsightText(pageText || hotspot.evidence).slice(0, 500),
+      relevanceScore,
+      retained,
+      reason: retained ? "Product complaint and compliance signals corroborated in crawled page" : "Low-signal or generic source after crawl",
+    };
+  } catch (error) {
+    return { ...hotspot, retained: false, reason: `Could not crawl source: ${error.message}` };
+  }
+}
+
+function buildHotspotAnalysis(category, crawledSources) {
+  const retained = crawledSources.filter((source) => source.retained);
+  const filteredNoiseCount = crawledSources.length - retained.length;
+  const findings = insightIssuePatterns.map((issue) => {
+    const matches = retained.filter((source) => source.issues.includes(issue.label));
+    return {
+      key: issue.key,
+      issue: issue.label,
+      mentions: matches.length,
+      confidence: matches.length >= 3 ? "high" : matches.length >= 2 ? "medium" : "low",
+      sources: matches.slice(0, 8).map(({ subject, url, source, evidence, relevanceScore }) => ({ subject, url, source, evidence, relevanceScore })),
+    };
+  }).filter((finding) => finding.mentions > 0).sort((a, b) => b.mentions - a.mentions);
+
+  return {
+    category,
+    analyzedAt: new Date().toISOString(),
+    method: "Tavily discovery followed by direct public-page crawling and relevance filtering",
+    crawledCount: crawledSources.length,
+    retainedCount: retained.length,
+    filteredNoiseCount,
+    caveat: "Retained sources are corroborated public signals, not proof of a violation. An officer should inspect the linked evidence before action.",
+    executiveSummary: retained.length
+      ? `${retained.length} of ${crawledSources.length} discovered discussions survived the evidence filter. ${findings[0]?.issue || "The retained sources require manual review"} is the leading signal.`
+      : "No discovered discussion survived the evidence filter; the candidate list was mostly generic or insufficiently specific.",
+    findings,
+    retainedSources: retained,
+    filteredSources: crawledSources.filter((source) => !source.retained).map(({ subject, url, source, reason }) => ({ subject, url, source, reason })),
+    recommendedActions: [
+      "Open retained sources and verify the original complaint context.",
+      "Cross-check the product label or listing against the relevant Legal Metrology rule.",
+      "Record only corroborated complaints in an enforcement case file.",
+    ],
+  };
+}
+
+app.post("/api/analyze-complaint-hotspots", async (req, res) => {
+  try {
+    const { category, hotspots } = req.body || {};
+    const validCategories = ['food', 'cosmetics', 'electronics', 'clothing', 'home-care'];
+    if (!validCategories.includes(category) || !Array.isArray(hotspots)) {
+      return res.status(400).json({ error: "category and hotspots are required" });
+    }
+    const candidates = hotspots.slice(0, 12);
+    const crawledSources = [];
+    for (let index = 0; index < candidates.length; index += 4) {
+      crawledSources.push(...await Promise.all(candidates.slice(index, index + 4).map(crawlComplaintHotspot)));
+    }
+    return res.json(buildHotspotAnalysis(category, crawledSources));
+  } catch (error) {
+    console.error("[analyze-complaint-hotspots] error:", error.message);
+    return res.status(502).json({ error: "Complaint hotspot analysis failed", details: error.message });
+  }
+});
+
+app.post("/api/complaint-crawl", async (req, res) => {
+  try {
+    const { category } = req.body || {};
+    const validCategories = ['food', 'cosmetics', 'electronics', 'clothing', 'home-care'];
+    if (!validCategories.includes(category)) {
+      return res.status(400).json({ error: `category must be one of: ${validCategories.join(', ')}` });
+    }
+    const sources = await searchComplaintSources(category);
+    return res.json(buildComplaintReport(category, sources));
+  } catch (error) {
+    console.error("[complaint-crawl] error:", error.message);
+    return res.status(502).json({ error: "Complaint-source search failed", details: error.message });
+  }
+});
+
+app.post("/api/product-insights", async (req, res) => {
+  try {
+    const { productName, productUrl } = req.body || {};
+    if (!productName || typeof productName !== "string") {
+      return res.status(400).json({ error: "productName is required" });
+    }
+    const sources = await searchPublicInsights(productName.trim(), productUrl);
+    return res.json(buildInsightReport(productName.trim(), sources));
+  } catch (error) {
+    console.error("[product-insights] error:", error.message);
+    return res.status(502).json({ error: "Public source search failed", details: error.message });
+  }
+});
+
 /* ===== Live Product Crawling Route ===== */
 app.post("/api/crawl-products", async (req, res) => {
   try {
@@ -1617,7 +2189,7 @@ app.post("/api/crawl-products", async (req, res) => {
     }
 
     const validCategories = ['food', 'cosmetics', 'electronics', 'clothing', 'home-care'];
-    const validPlatforms = ['amazon', 'flipkart', 'all'];
+    const validPlatforms = ['amazon', 'flipkart', 'swiggy', 'blinkit', 'zepto', 'all'];
 
     if (!validCategories.includes(category)) {
       return res.status(400).json({ error: `Invalid category. Must be one of: ${validCategories.join(', ')}` });
@@ -1639,7 +2211,10 @@ app.post("/api/crawl-products", async (req, res) => {
       const searchUrls = generateSearchUrls(category, platform);
       console.log(`🔍 Generated ${searchUrls.length} search URLs:`, searchUrls);
 
-      for (const searchUrl of searchUrls.slice(0, 2)) { // Limit to 2 platforms for demo
+      const platformTargets = platform === 'all'
+        ? [0, 5, 10, 11, 12].map((index) => searchUrls[index]).filter(Boolean)
+        : searchUrls.slice(0, 3);
+      for (const searchUrl of platformTargets) {
         try {
           console.log(`🔍 Attempting to crawl: ${searchUrl}`);
           const crawledProducts = await crawlProductsFromUrl(searchUrl, Math.min(5, maxProducts));
@@ -1923,6 +2498,18 @@ function generateSearchUrls(category, platform) {
     });
   }
 
+  if (!platform || platform === 'all' || platform === 'swiggy') {
+    urls.push(`https://www.swiggy.com/instamart/search?query=${encodeURIComponent(terms[0])}`);
+  }
+
+  if (!platform || platform === 'all' || platform === 'blinkit') {
+    urls.push(`https://blinkit.com/s/?q=${encodeURIComponent(terms[0])}`);
+  }
+
+  if (!platform || platform === 'all' || platform === 'zepto') {
+    urls.push(`https://www.zeptonow.com/search?query=${encodeURIComponent(terms[0])}`);
+  }
+
   return urls;
 }
 
@@ -2162,6 +2749,36 @@ async function crawlProductsFromUrl(searchUrl, maxProducts) {
 
       products.push(...flipkartProducts);
       console.log(`✅ Found ${flipkartProducts.length} Flipkart products`);
+    } else if (host.includes('swiggy') || host.includes('blinkit') || host.includes('zepto')) {
+      const platformName = platformFromHost(host);
+      console.log(`🛒 Extracting ${platformName} products with generic card selectors...`);
+      const quickCommerceProducts = await page.evaluate(({ max, platformName }) => {
+        const moneyPattern = /(?:₹|Rs\.?\s*)[\d,]+(?:\.\d+)?/i;
+        const anchors = Array.from(document.querySelectorAll('a[href]'));
+        const seen = new Set();
+        return anchors.map((anchor, index) => {
+          const text = (anchor.textContent || '').replace(/\s+/g, ' ').trim();
+          const href = anchor.getAttribute('href');
+          const image = anchor.querySelector('img');
+          const price = text.match(moneyPattern)?.[0]?.replace(/[^\d.]/g, '') || null;
+          if (!href || !text || text.length < 8 || text.length > 180 || (!price && !image)) return null;
+          const url = new URL(href, window.location.origin).href;
+          if (seen.has(url)) return null;
+          seen.add(url);
+          return {
+            id: `${platformName.toLowerCase().replace(/\s+/g, '-')}_${Date.now()}_${index}`,
+            productName: text,
+            price,
+            image: image?.getAttribute('src') || image?.getAttribute('data-src') || null,
+            url,
+            platform: platformName,
+            timestamp: new Date().toISOString(),
+            source: 'crawled'
+          };
+        }).filter(Boolean).slice(0, max);
+      }, { max: Math.min(5, maxProducts), platformName });
+      products.push(...quickCommerceProducts);
+      console.log(`✅ Found ${quickCommerceProducts.length} ${platformName} products`);
     }
 
   } catch (error) {
@@ -2580,7 +3197,7 @@ app.get("/health", async (_req, res) => {
 });
 
 /* ===== 18) Handle OPTIONS requests for CORS ===== */
-app.options('*', (req, res) => {
+app.options(/.*/, (req, res) => {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
