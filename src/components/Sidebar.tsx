@@ -5,7 +5,7 @@ import {
   Package, 
   ScanLine, 
   FileText, 
-
+  MapPin,
   CheckCircle,
   Camera, 
   Scan 
@@ -38,6 +38,7 @@ const Sidebar: React.FC<SidebarProps> = ({ activeView, onViewChange }) => {
     { id: 'checker', label: 'Compliance Checker', icon: Search, color: 'text-purple-600' },
     { id: 'products', label: 'Product Listings', icon: Package, color: 'text-green-600' },
     { id: 'ocr', label: 'OCR Scanner', icon: ScanLine, color: 'text-orange-600' },
+    { id: 'heatmap', label: 'Geospatial Heatmap', icon: MapPin, color: 'text-red-500', badge: 'Hotspots' },
     { id: 'esp32', label: 'ESP32 Scanner', icon: Camera, color: 'text-teal-600' },
     { id: 'barcode', label: 'Barcode Scanner', icon: Scan, color: 'text-indigo-600' },
     { id: 'reports', label: 'Reports', icon: FileText, color: 'text-red-600' },

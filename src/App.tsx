@@ -21,6 +21,7 @@ import LiveCrawlMonitor from './components/LiveCrawlMonitor';
 import ESP32Scanner from './components/ESP32Scanner';
 import BarcodeScanner from './components/BarcodeScanner';
 import EnhancedDashboard from './components/EnhancedDashboard';
+import GeospatialHeatmap from './components/GeospatialHeatmap';
 
 // Chatbot Component
 import Chatbot from './components/chatbot/Chatbot';
@@ -58,6 +59,9 @@ function UserApp() {
       
       case 'ocr':
         return <OCRScanner />;
+      
+      case 'heatmap':
+        return <GeospatialHeatmap />;
       
       case 'esp32':
         return <ESP32Scanner />;

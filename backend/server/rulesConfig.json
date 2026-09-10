@@ -1,8 +1,304 @@
 {
   "meta": {
     "source": "Legal Metrology (Packaged Commodities) Rules, 2011 (as amended up to 24.12.2024)",
-    "lastVerified": "2024-12-24"
+    "lastVerified": "2024-12-24",
+    "totalRules": 34,
+    "chapters": [
+      { "id": "chapter_1", "title": "Chapter I: Preliminary", "rules": ["1", "2", "3"] },
+      { "id": "chapter_2", "title": "Chapter II: Provisions Applicable to Packages Intended for Retail Sale", "rules": ["4", "5", "6", "7", "8", "9", "10", "11", "12", "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26"] },
+      { "id": "chapter_3", "title": "Chapter III: Provisions Applicable to Wholesale Packages", "rules": ["27", "28"] },
+      { "id": "chapter_4", "title": "Chapter IV: Export and Import of Packaged Commodities", "rules": ["29", "30"] },
+      { "id": "chapter_5", "title": "Chapter V: Registration of Manufacturers, Packers and Importers", "rules": ["31", "32"] },
+      { "id": "chapter_6", "title": "Chapter VI: Miscellaneous", "rules": ["33", "34"] }
+    ]
   },
+  "allRules": [
+    {
+      "ruleNumber": 1,
+      "chapter": "Chapter I",
+      "title": "Short title, extent and commencement",
+      "summary": "Establishes title as Legal Metrology (Packaged Commodities) Rules, 2011 and defines its nationwide legal jurisdiction across India.",
+      "category": "Preliminary",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 2,
+      "chapter": "Chapter I",
+      "title": "Definitions",
+      "summary": "Defines statutory terms including combination package, group package, multi-piece package, institutional consumer, industrial consumer, principal display panel (PDP), retail dealer, retail package, retail sale price (MRP), and unit sale price (USP).",
+      "category": "Definitions",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 3,
+      "chapter": "Chapter I",
+      "title": "Applicability of Chapter II",
+      "summary": "Specifies Chapter II applies to all packages intended for retail sale. Exempts packages >25kg or >25L (excl. cement/fertilizer up to 50kg) and sales to industrial/institutional consumers.",
+      "category": "Scope & Applicability",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 4,
+      "chapter": "Chapter II",
+      "title": "Regulation for pre-packing and sale of commodities in packaged form",
+      "summary": "Prohibits pre-packing, distribution, sale, or delivery of any commodity in packaged form unless it complies with all declarations and packaging standards of these rules.",
+      "category": "General Regulation",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 5,
+      "chapter": "Chapter II",
+      "title": "Specific commodities to be packed and sold in standard packages",
+      "summary": "Mandates that commodities specified in the Second Schedule (baby food, tea, coffee, edible oil, biscuits, cereals, etc.) must be packed only in prescribed rationalized standard weight/volume packages.",
+      "category": "Standard Packaging Sizes",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 6,
+      "chapter": "Chapter II",
+      "title": "Declarations to be made on every package",
+      "summary": "Mandates 10 core declarations: (1)(a) Manufacturer/Packer/Importer details with PIN, (1)(aa) Country of origin for imports, (1)(b) Generic name, (1)(c) Net quantity, (1)(d) Month/year of manufacture, (1)(da) Expiry/Best-before, (1)(e) MRP inclusive of taxes, (1)(f) Dimensions where relevant, (2) Consumer grievance details (phone & email), (10) E-commerce digital declarations, (11) Unit Sale Price (USP).",
+      "category": "Mandatory Label Declarations",
+      "status": "Active",
+      "keySubrules": [
+        "Rule 6(1)(a) - Name and complete address of manufacturer/packer/importer",
+        "Rule 6(1)(aa) - Country of origin for imported goods",
+        "Rule 6(1)(b) - Common or generic name of commodity",
+        "Rule 6(1)(c) - Net quantity in standard SI units",
+        "Rule 6(1)(d) - Month & Year of manufacture/packing",
+        "Rule 6(1)(da) - Best before / use by date for perishables",
+        "Rule 6(1)(e) - Maximum Retail Price (MRP) 'inclusive of all taxes'",
+        "Rule 6(1)(f) - Dimensions of commodities where size is relevant",
+        "Rule 6(2) - Consumer care contact (name/office, phone, email, address)",
+        "Rule 6(10) - E-commerce mandatory digital listing declarations",
+        "Rule 6(11) - Unit Sale Price (USP) per g/kg, ml/L, cm/m, or per number"
+      ]
+    },
+    {
+      "ruleNumber": 7,
+      "chapter": "Chapter II",
+      "title": "Principal Display Panel (PDP) – its area, size and letter height",
+      "summary": "Establishes Table-I specifications for minimum permissible font height of numerals and letters based on the total surface area of the Principal Display Panel (PDP).",
+      "category": "Typography & Display Standards",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 8,
+      "chapter": "Chapter II",
+      "title": "Declaration where to appear",
+      "summary": "Requires all mandatory declarations to be grouped together and clearly visible on the Principal Display Panel without opening or damaging the container.",
+      "category": "Display Placement",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 9,
+      "chapter": "Chapter II",
+      "title": "Manner in which declaration shall be made",
+      "summary": "Mandates high visual contrast against background, prominent and legible typography, clear layout, and declaration in Hindi (Devanagari script) or English.",
+      "category": "Legibility & Language",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 10,
+      "chapter": "Chapter II",
+      "title": "Declaration of name and address of the manufacturer, packer or importer",
+      "summary": "Regulates exact postal address declaration requirements, corporate office disclosures, contract packaging declarations, and electronic products QR code address options.",
+      "category": "Manufacturer Details",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 11,
+      "chapter": "Chapter II",
+      "title": "General provisions relating to declaration of quantity",
+      "summary": "Requires net quantity to express the pure net weight, measure or volume of the commodity excluding all wrapper and packaging materials (tare weight exclusion).",
+      "category": "Net Quantity Verification",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 12,
+      "chapter": "Chapter II",
+      "title": "Manner of declaration of quantity",
+      "summary": "Specifies placement of units, decimal fraction notations, and prohibitions on misleading fraction representations in net weight/volume expressions.",
+      "category": "Quantity Notation",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 13,
+      "chapter": "Chapter II",
+      "title": "Statement of units of weight, measure or number",
+      "summary": "Mandates SI metric units (g, kg, ml, l, m, cm, mm, number, piece, pair, set). Strictly prohibits qualifying words such as 'approx', 'minimum', 'not less than', 'average', or 'about'.",
+      "category": "SI Metric Standards",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 14,
+      "chapter": "Chapter II",
+      "title": "Declarations on packages containing commodities of varying size and dimension",
+      "summary": "Governs labeling of bedsheets, sarees, curtains, towels, wires, ropes, paper sheets, tiles, and containers specifying width, length, and usable dimensions.",
+      "category": "Dimensional Declarations",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 15,
+      "chapter": "Chapter II",
+      "title": "Declaration of quantity in relation to commodities packed in numbers",
+      "summary": "Specifies rules for commodities sold by numerical count (tablets, capsules, pens, matchsticks, bandages, napkins, eggs).",
+      "category": "Numerical Count Units",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 16,
+      "chapter": "Chapter II",
+      "title": "Declarations on combination, group and multi-piece packages",
+      "summary": "Mandates outer carton disclosures showing individual item names, net quantity of each component, total number of units, and total combined MRP inclusive of taxes.",
+      "category": "Combo & Multi-Packs",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 17,
+      "chapter": "Chapter II",
+      "title": "Qualifications / non-misleading statements in relation to units of measurement",
+      "summary": "Prohibits deceptive qualifiers modifying units of measure (e.g. 'jumbo litre', 'giant kilogram', 'commercial metre', 'super gram').",
+      "category": "Misleading Qualifiers",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 18,
+      "chapter": "Chapter II",
+      "title": "Provisions relating to retail sale and actions by retail dealers",
+      "summary": "Strictly prohibits selling at a price higher than declared MRP, smudging, altering, overwriting, stickering higher price, or concealing the declared retail price.",
+      "category": "Retail Price Enforcement",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 19,
+      "chapter": "Chapter II",
+      "title": "Inspection of quantity in pre-packed commodities",
+      "summary": "Authorizes Legal Metrology Officers to inspect premises, draw samples, weigh packages, and verify net quantity at factory, warehouse, and retail points.",
+      "category": "Inspection & Sampling",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 20,
+      "chapter": "Chapter II",
+      "title": "Action to be taken on determination of error in quantity",
+      "summary": "Defines Maximum Permissible Error (MPE) tolerances under the First Schedule and prescribes statutory action when individual or batch error exceeds limits.",
+      "category": "MPE Tolerance Limits",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 21,
+      "chapter": "Chapter II",
+      "title": "Action to be taken on determination of non-standard packages",
+      "summary": "Grants power to seize, confiscate, or initiate prosecution for packages not conforming to standardized sizes under Schedule II.",
+      "category": "Non-Standard Seizures",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 22,
+      "chapter": "Chapter II",
+      "title": "Manner of selection of samples for testing",
+      "summary": "Prescribes statistical sampling plans and sample size tables relative to batch/lot size for official net quantity verification.",
+      "category": "Statistical Sampling Plans",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 23,
+      "chapter": "Chapter II",
+      "title": "Checking of quantity of samples and compliance assessment",
+      "summary": "Standardizes laboratory testing and measurement procedures for determination of average net quantity and individual package defects.",
+      "category": "Laboratory Testing",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 24,
+      "chapter": "Chapter II",
+      "title": "Checking of quantity in retail packages",
+      "summary": "Prescribes on-site point-of-sale test weighing and verification protocols for consumer retail packages.",
+      "category": "Retail Audit Protocols",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 25,
+      "chapter": "Chapter II",
+      "title": "Action by Director, Controller or Legal Metrology Officer in cases of short delivery / defective packages",
+      "summary": "Empowers authorities to issue show-cause notices, compound offences, or file court complaints for short-weight and misleading packages.",
+      "category": "Enforcement Actions",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 26,
+      "chapter": "Chapter II",
+      "title": "Exemptions in respect of certain packages",
+      "summary": "Exempts: (a) packages <=10g or <=10ml (except tobacco), (b) fast food packed by hotels/restaurants, (c) DPCO scheduled drug formulations (excl. medical devices), (d) loose garments/hosiery, (e) loose e-commerce sales, (f) handloom raw yarn coils.",
+      "category": "Statutory Exemptions",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 27,
+      "chapter": "Chapter III",
+      "title": "Declarations on wholesale packages",
+      "summary": "Requires wholesale containers to declare: (a) Name & address of manufacturer/packer, (b) Generic name, (c) Total net quantity or number of retail packages inside, (d) Wholesale Maximum Retail Price.",
+      "category": "Wholesale Declarations",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 28,
+      "chapter": "Chapter III",
+      "title": "Special provisions relating to wholesale packages",
+      "summary": "Defines packaging and labeling exceptions for wholesale bulk containers transported directly to industrial or processing facilities.",
+      "category": "Wholesale Bulk Rules",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 29,
+      "chapter": "Chapter IV",
+      "title": "Provisions relating to export of packaged commodities",
+      "summary": "Exempts packages manufactured exclusively for export from domestic label formats, allowing compliance with destination country standards.",
+      "category": "Export Compliance",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 30,
+      "chapter": "Chapter IV",
+      "title": "Provisions relating to import of packaged commodities",
+      "summary": "Mandates that imported packaged goods must bear all mandatory Indian declarations (importer name, address, origin, MRP in INR, Net Qty in SI units) prior to customs clearance.",
+      "category": "Import & Customs Clearance",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 31,
+      "chapter": "Chapter V",
+      "title": "Mandatory registration of manufacturers, packers and importers",
+      "summary": "Requires all pre-packers, manufacturers, and importers to register their business premises and commodity categories with Central Director or State Controller of Legal Metrology within 90 days.",
+      "category": "Mandatory Registration",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 32,
+      "chapter": "Chapter V",
+      "title": "Penalty for contravention of rules",
+      "summary": "Prescribes compounding fines under Section 36 of Legal Metrology Act: up to ₹25,000 for 1st offence, ₹50,000 for 2nd offence, and up to ₹1,00,000 / imprisonment for subsequent offences.",
+      "category": "Penalties & Fines",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 33,
+      "chapter": "Chapter VI",
+      "title": "Power to exempt",
+      "summary": "Vests authority in the Central Government to grant general or special exemptions to specific industries or commodities in public interest.",
+      "category": "Government Exemptions",
+      "status": "Active"
+    },
+    {
+      "ruleNumber": 34,
+      "chapter": "Chapter VI",
+      "title": "Repeal and savings",
+      "summary": "Repeals the Standards of Weights and Measures (Packaged Commodities) Rules, 1977 while preserving rights, liabilities, and prior actions initiated thereunder.",
+      "category": "Repeal & Transition",
+      "status": "Active"
+    }
+  ],
   "mandatoryFields": [
     {
       "id": "manufacturer_packer_importer",

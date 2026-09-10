@@ -32,6 +32,7 @@ import jwt from 'jsonwebtoken';
 import bcryptjs from 'bcryptjs';
 import { evaluateCompliance, rulesConfig } from "./complianceEngine.js";
 import PDFDocument from 'pdfkit';
+import { recordGeoScan, getGeospatialComplianceData, extractGeoLocation } from "./geoService.js";
 
 const bcrypt = bcryptjs;
 
@@ -211,14 +212,15 @@ app.delete('/api/admin/users/:id', authenticateToken, requireAdmin, (req, res) =
 // ==================== END AUTHENTICATION CODE ====================
 
 /* ===== 3) Config ===== */
-const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-2.5-flash";
+const GEMINI_MODEL = process.env.GEMINI_MODEL || "gemini-3.5-flash";
 const GEMINI_FALLBACK_MODELS = [
   process.env.GEMINI_MODEL,
-  "gemini-2.5-flash",
-  "gemini-1.5-flash",
-  "gemini-2.0-flash",
+  "gemini-3.5-flash",
+  "gemini-3.1-flash-lite",
+  "gemini-3.8-flash",
   "gemini-3.7-flash",
-  "gemini-1.5-pro",
+  "gemini-flash-latest",
+  "gemini-2.5-pro",
 ].filter(Boolean).filter((v, i, a) => a.indexOf(v) === i);
 const GEMINI_KEY = process.env.GEMINI_API_KEY || "";
 const OCR_PROVIDERS = (process.env.OCR_PROVIDERS || "").toLowerCase().split(",").map(s => s.trim()).filter(Boolean);
@@ -455,15 +457,17 @@ function parseFields(fullText) {
     }
   }
 
-  // Unit Sale Price (USP) (e.g. (RS. 2.99/ML), Rs 2.99 / ml)
+  // Unit Sale Price (USP) (e.g. (RS. 2.99/ML), Rs 2.99 / ml, ₹2.99/ml, USP: Rs. 2.99/ml)
   const mUsp =
-    upper.match(/(?:USP|UNIT\s*SALE\s*PRICE|\(RS\.?|\(INR)\s*[:\.\-]?\s*([₹Rs\.]?\s?\d+(?:\.\d+)?\s*\/\s*(?:ML|L|G|GM|KG|PCS|PIECE|UNIT|M|CM))/i);
+    upper.match(/(?:USP|UNIT\s*SALE\s*PRICE|\(?\s*(?:RS\.?|INR|₹))\s*[:\.\-]?\s*([₹Rs\.]?\s?\d+(?:\.\d+)?\s*\/\s*(?:ML|L|LTR|G|GM|KG|PCS|PIECE|UNIT|M|CM)\b\)?)/i) ||
+    upper.match(/(\d+(?:\.\d+)?\s*\/\s*(?:ML|L|LTR|G|GM|KG|PCS|PIECE|UNIT|M|CM)\b)/i);
   let uspVal = null;
   let isUspCompliant = false;
   let uspReason = "USP not detected.";
 
   if (mUsp && mUsp[1]) {
-    const uspMatch = mUsp[1].match(/(\d+(?:\.\d+)?)/);
+    const rawUspText = mUsp[1].replace(/[\)\(]/g, "").trim();
+    const uspMatch = rawUspText.match(/(\d+(?:\.\d+)?)/);
     if (uspMatch) {
       uspVal = parseFloat(uspMatch[1]);
       if (mrpVal && netQtyVal && netQtyVal > 0) {
@@ -942,6 +946,57 @@ app.get("/api/proxy-image", async (req, res) => {
   }
 });
 
+/* ===== 9.1) Legal Metrology 2011 - All 34 Rules Endpoint ===== */
+app.get("/api/rules", (req, res) => {
+  try {
+    const chapter = req.query.chapter;
+    const search = (req.query.search || "").toLowerCase();
+    let results = rulesConfig.allRules || [];
+
+    if (chapter) {
+      results = results.filter((r) => r.chapter.toLowerCase() === chapter.toLowerCase());
+    }
+    if (search) {
+      results = results.filter(
+        (r) =>
+          r.title.toLowerCase().includes(search) ||
+          r.summary.toLowerCase().includes(search) ||
+          `rule ${r.ruleNumber}`.includes(search) ||
+          (r.category && r.category.toLowerCase().includes(search))
+      );
+    }
+
+    res.json({
+      meta: rulesConfig.meta,
+      totalRules: results.length,
+      rules: results,
+    });
+  } catch (e) {
+    res.status(500).json({ error: "Failed to fetch rules catalog" });
+  }
+});
+
+app.get("/api/rules/:ruleNumber", (req, res) => {
+  const num = parseInt(req.params.ruleNumber, 10);
+  const rule = (rulesConfig.allRules || []).find((r) => r.ruleNumber === num);
+  if (!rule) {
+    return res.status(404).json({ error: `Rule ${req.params.ruleNumber} not found` });
+  }
+  res.json({ rule });
+});
+
+/* ===== 9.2) Geospatial Compliance Heatmap Analytics Endpoint ===== */
+app.get("/api/analytics/geospatial", (req, res) => {
+  try {
+    const { timeframe = "all", category = "all", state = "all" } = req.query;
+    const data = getGeospatialComplianceData({ timeframe, category, state });
+    res.json(data);
+  } catch (e) {
+    console.error("[/api/analytics/geospatial] error:", e);
+    res.status(500).json({ error: "Failed to compute geospatial compliance analytics" });
+  }
+});
+
 /* ===== 10) OCR Image Preparation & Engines ===== */
 
 // High quality auto-oriented RGB image for multimodal AI (Gemini / Google Vision)
@@ -1160,11 +1215,29 @@ app.post("/api/ocr", upload.single("image"), async (req, res) => {
     const extractedText = fullText ? fullText.split(/\r?\n/).filter(Boolean) : [];
     const ms = Date.now() - startedAt;
 
+    // Record scan to geospatial manufacturing database
+    const manuText = detectedFields.manufacturer?.text || "";
+    const prodName = detectedFields.productName?.text || "";
+    const isCompliant = Object.values(detectedFields).filter(f => f.text != null).every(f => f.compliant);
+    const violations = Object.entries(detectedFields)
+      .filter(([_, f]) => !f.compliant)
+      .map(([k, f]) => ({ field: k, ruleRef: f.ruleRef, description: f.notes }));
+
+    const geoLocation = recordGeoScan({
+      productName: prodName,
+      manufacturer: manuText,
+      extractedText: fullText,
+      complianceScore: Math.round((Object.values(detectedFields).filter(f => f.compliant).length / Math.max(1, Object.keys(detectedFields).length)) * 100),
+      isCompliant,
+      violations
+    });
+
     return res.json({
       provider: usedProvider,
       confidence: out.confidence,
       extractedText,
       detectedFields,
+      geoLocation,
       ms,
       fast: !!FAST,
       modelUsed: out.modelUsed || undefined,
