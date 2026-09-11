@@ -33,6 +33,7 @@ import bcryptjs from 'bcryptjs';
 import { evaluateCompliance, rulesConfig } from "./complianceEngine.js";
 import PDFDocument from 'pdfkit';
 import { recordGeoScan, getGeospatialComplianceData, extractGeoLocation } from "./geoService.js";
+import { universalBarcodeLookup } from "./barcodeService.js";
 
 const bcrypt = bcryptjs;
 
@@ -391,38 +392,11 @@ async function decodeBarcode(imageBuffer) {
 async function lookupBarcodeInfo(barcode) {
   console.log('=== BARCODE LOOKUP START ===');
   console.log('Looking up barcode:', barcode);
-  console.log('API URL:', BARCODE_API_BASE);
   try {
-    const response = await axios.get(BARCODE_API_BASE, {
-      params: { upc: barcode },
-      timeout: 10000
-      // No headers needed for free tier
-    });
-
-    console.log('✅ API Success - Status:', response.status);
-    console.log('✅ API Response:', response.data);
-
-    if (response.data.code === "OK" && response.data.items && response.data.items.length > 0) {
-      const item = response.data.items[0];
-      return {
-        barcode,
-        productName: item.title || null,
-        brand: item.brand || null,
-        category: item.category || null,
-        description: item.description || null,
-        image: item.images && item.images.length > 0 ? item.images[0] : null,
-        upc: item.upc || null,
-        ean: item.ean || null,
-        found: true
-      };
-    }
-    return { barcode, found: false };
+    const result = await universalBarcodeLookup(barcode);
+    return result;
   } catch (error) {
     console.error('Barcode lookup error:', error);
-
-    console.error('❌ LOOKUP ERROR:', error.message);
-    console.error('❌ Error details:', error.response?.data || error);
-
     return { barcode, found: false, error: error.message };
   }
 }
@@ -3086,7 +3060,6 @@ app.post("/api/barcode/decode", upload.single("image"), async (req, res) => {
 
 // Look up product by barcode number
 app.get("/api/barcode/lookup/:barcode", async (req, res) => {
-
   console.log('=== BARCODE ROUTE HIT ===');
   console.log('Barcode param:', req.params.barcode);
 
@@ -3096,22 +3069,16 @@ app.get("/api/barcode/lookup/:barcode", async (req, res) => {
   res.setHeader("Access-Control-Allow-Headers", "Content-Type");
 
   try {
-    const barcode = req.params.barcode;
-
-    // Validate barcode format (basic check)
-    if (!/^\d{8,14}$/.test(barcode)) {
-      return res.status(400).json({
-        error: "Invalid barcode format"
-      });
+    const rawBarcode = req.params.barcode;
+    if (!rawBarcode || !rawBarcode.trim()) {
+      return res.status(400).json({ error: "Barcode parameter is required" });
     }
 
-
-    console.log('🔍 Calling lookupBarcodeInfo...');
-    const productInfo = await lookupBarcodeInfo(barcode);
-    console.log('✅ Sending response:', productInfo);
+    const barcode = rawBarcode.trim();
+    console.log('🔍 Calling universalBarcodeLookup for:', barcode);
+    const productInfo = await universalBarcodeLookup(barcode);
+    console.log('✅ Sending response:', productInfo.productName);
     res.json(productInfo);
-
-
   } catch (error) {
     console.error('Barcode lookup error:', error);
     res.status(500).json({
